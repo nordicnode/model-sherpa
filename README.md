@@ -93,4 +93,4 @@ You can extend Sherpa's recovery logic via the `custom_hints` array in `state.js
 ---
 
 ## 📜 License
-MIT License. Created by the DeepMind Advanced Agentic Coding team.
+MIT License.
