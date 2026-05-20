@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE files
+.vscode/
+.idea/
+
+# Local state (Sherpa specific)
+state.json
+state.json.tmp
+state.lock
+events.jsonl
+corrections.log
+*.1.jsonl
+*.1.log
+*.bak
