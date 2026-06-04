@@ -92,5 +92,44 @@ You can extend Sherpa's recovery logic via the `custom_hints` array in `state.js
 
 ---
 
+## 🛠️ Development
+
+This plugin ships with a smoke test suite and a `Makefile` for quick local checks.
+
+```bash
+# Static analysis (catches undefined names, missing globals, etc.)
+make lint
+
+# Run the 26 pytest smoke tests (hook happy paths, regression tests
+# for the bug fixes, feature coverage).
+make test
+
+# Both, in order.
+make check
+```
+
+The `make lint` target runs `pyflakes` against `__init__.py` — the same
+static analysis that uncovered four of the five critical bugs in the
+v0.3.0 review. It is strongly recommended to run `make lint` before opening a PR.
+
+Tests live in `tests/test_smoke.py` and use a temporary `HERMES_HOME`
+so they never touch the real user's state. They cover:
+
+- The five regression bugs from the v0.3.0 review
+- Loop detection end-to-end (`_post_tool_call` → `_queue_nudge`)
+- Smart-quote repair and arg-name alias repair
+- `command_lint` ($ prompt strip, `cd` extraction)
+- `arg_guard` (empty required args)
+- Per-tool stat key collision safety (Issue #11)
+- Fingerprint cycle / depth-cap safety (Issue #10)
+- Concurrency and lock retry safety on state lock file
+- Cross-process log rotation safety for corrections and events logs
+- Background daemon thread/timer leak prevention for cleanup and periodic flush tasks
+- Stale session cleanup start/restart safety on session initialization
+- Candidate scanning limits in `_didyoumean_path` to optimize latency
+- `__version__` consistency
+
+---
+
 ## 📜 License
 MIT License.

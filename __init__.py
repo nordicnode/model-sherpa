@@ -121,14 +121,21 @@ logger = logging.getLogger("model-sherpa")
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
 STATE_DIR = HERMES_HOME / "memories" / "model-sherpa"
 STATE_FILE = STATE_DIR / "state.json"
+LOCK_FILE = STATE_DIR / "state.lock"   # fcntl flock target (Bug #1 fix)
 LOG_FILE = STATE_DIR / "corrections.log"
 EVENT_LOG_FILE = STATE_DIR / "events.jsonl"
 
+__version__ = "0.3.1"   # keep in sync with plugin.yaml
+
 _state_lock = threading.RLock()
-_log_lock = threading.Lock()
-_event_log_lock = threading.Lock()
+# RLocks so log-rotation (which re-acquires the same lock inside _rotate_file)
+# does not deadlock with the caller that already holds it.
+_log_lock = threading.RLock()
+_event_log_lock = threading.RLock()
+_event_rotate_lock = threading.RLock()   # separate lock so event-rotation doesn't contend with correction-log writes
 
 _last_stat_time = 0.0
+_last_rotation_check = 0.0   # Bug #3 fix: was referenced but never assigned
 
 # In-memory cache for _load_state. Hooks (pre_tool_call, post_tool_call,
 # pre_llm_call) call _feature() many times per turn, which used to re-read,
@@ -195,21 +202,56 @@ def _deep_merge(defaults: Any, override: Any) -> Any:
 
 @contextlib.contextmanager
 def _lock_state_file(mode: int):
-    """Acquire a cross-process lock on state.lock (LOCK_SH or LOCK_EX)."""
+    """Acquire a cross-process lock on state.lock (LOCK_SH or LOCK_EX).
+
+    Uses LOCK_NB with a retry loop so a contested lock does not block the CLI
+    indefinitely, but still prevents race conditions by attempting to acquire
+    the lock multiple times before failing open.
+    """
     if fcntl is None:
         yield
         return
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        with lock_file.open("w") as f:
-            try:
-                # Use non-blocking locks to ensure the CLI never hangs on startup
-                # even if a lock is contested.
-                fcntl.flock(f, mode | fcntl.LOCK_NB)
-            except OSError:
-                pass
+        with LOCK_FILE.open("a+") as f:
+            acquired = False
+            for _ in range(10):
+                try:
+                    fcntl.flock(f, mode | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError:
+                    time.sleep(0.01)
+            if not acquired:
+                logger.debug("model-sherpa: lock acquisition on %s failed after retries, proceeding without lock", LOCK_FILE)
             yield
-    except Exception:
+    except Exception as exc:
+        logger.debug("model-sherpa: cross-process lock unavailable: %s", exc)
+        yield
+
+
+@contextlib.contextmanager
+def _lock_file(lock_path: Path, mode: int):
+    """Acquire a cross-process lock on a specific file path."""
+    if fcntl is None:
+        yield
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as f:
+            acquired = False
+            for _ in range(10):
+                try:
+                    fcntl.flock(f, mode | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError:
+                    time.sleep(0.01)
+            if not acquired:
+                logger.debug("model-sherpa: lock acquisition on %s failed after retries, proceeding without lock", lock_path)
+            yield
+    except Exception as exc:
+        logger.debug("model-sherpa: cross-process lock on %s unavailable: %s", lock_path, exc)
         yield
 
 
@@ -320,18 +362,40 @@ def _save_state(state: Dict[str, Any]) -> None:
             _state_cache_sig = None
 
 
-def _rotate_file(path: Path, max_size: int = 10 * 1024 * 1024, backup_count: int = 5) -> None:
-    """Atomic size-based log rotation (e.g. log.jsonl -> log.1.jsonl)."""
+def _rotate_file(path: Path, max_size: int = 10 * 1024 * 1024, backup_count: int = 5,
+                 lock: Optional[threading.Lock] = None) -> None:
+    """Atomic size-based log rotation (e.g. log.jsonl -> log.1.jsonl).
+
+    Issue #8 fix: callers can pass a per-file lock so the event log's rotation
+    doesn't contend with the corrections log's writes through the shared
+    ``_log_lock``. The lock is optional for backward compatibility — without
+    it, we fall back to ``_log_lock`` (the historical behavior).
+    """
+    effective_lock = lock if lock is not None else _log_lock
     try:
-        if not path.exists() or path.stat().st_size < max_size:
-            return
-        with _log_lock: # Reuse log lock for rotation
-            for i in range(backup_count - 1, 0, -1):
-                s = path.with_suffix(f".{i}{path.suffix}")
-                d = path.with_suffix(f".{i+1}{path.suffix}")
-                if s.exists():
-                    s.replace(d)
-            path.replace(path.with_suffix(f".1{path.suffix}"))
+        with effective_lock:
+            # Check size inside the lock to prevent concurrent double-rotation.
+            if not path.exists() or path.stat().st_size < max_size:
+                return
+            # Use cross-process lock for log rotation to prevent different processes
+            # from corrupting log files during simultaneous rotation.
+            lock_path = path.with_suffix(path.suffix + ".lock")
+            with _lock_file(lock_path, fcntl.LOCK_EX if fcntl else 0):
+                # Re-verify existence and size after acquiring cross-process lock.
+                if not path.exists() or path.stat().st_size < max_size:
+                    return
+                for i in range(backup_count - 1, 0, -1):
+                    s = path.with_suffix(f".{i}{path.suffix}")
+                    d = path.with_suffix(f".{i+1}{path.suffix}")
+                    if s.exists():
+                        try:
+                            s.replace(d)
+                        except Exception:
+                            pass
+                try:
+                    path.replace(path.with_suffix(f".1{path.suffix}"))
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -393,8 +457,13 @@ def _ensure_periodic_flush() -> None:
             _flush_stats_safely()
             global _periodic_flush_timer
             with _timer_lock:
-                _periodic_flush_timer = None
-            _ensure_periodic_flush()
+                with _session_lock:
+                    sessions_left = _all_session_ids()
+                if sessions_left:
+                    _periodic_flush_timer = None
+                    _ensure_periodic_flush()
+                else:
+                    _periodic_flush_timer = None
         _periodic_flush_timer = threading.Timer(
             _PERIODIC_FLUSH_INTERVAL, _tick
         )
@@ -419,6 +488,13 @@ def _schedule_flush() -> None:
     _ensure_periodic_flush()
 
 
+# Issue #11 fix: collision-proof compound key for per-tool stat buckets.
+# The previous implementation used "stat:tool" and split on the first ":",
+# which would misroute any stat key that legitimately contained a colon.
+# A sentinel that cannot appear in user-defined stat names removes that risk.
+_PER_TOOL_SEP = "\x1f"  # ASCII Unit Separator — forbidden in JSON keys
+
+
 def _bump_stat(key: str, n: int = 1) -> None:
     """Increment a stat in memory; the change is persisted automatically."""
     with _stats_lock:
@@ -429,13 +505,14 @@ def _bump_stat(key: str, n: int = 1) -> None:
 def _bump_tool_stat(tool_name: str, key: str, n: int = 1) -> None:
     """Increment both the global stat and the per-tool sub-stat.
 
-    Uses a compound pending key ``key:tool_name`` for the per-tool bucket;
-    ``_flush_stats()`` splits on the first ``:`` to route into
-    ``stats.per_tool[tool_name][key]``.
+    Issue #11 fix: the per-tool bucket is keyed by ``stat + _PER_TOOL_SEP + tool``
+    instead of the previous ``stat:tool`` string. The US (0x1F) separator
+    cannot appear in a JSON object key, so a future stat name with a colon
+    (e.g. ``"foo:bar"``) cannot be misrouted.
     """
     with _stats_lock:
         _pending_stats[key] = _pending_stats.get(key, 0) + n
-        compound = f"{key}:{tool_name}"
+        compound = f"{key}{_PER_TOOL_SEP}{tool_name}"
         _pending_stats[compound] = _pending_stats.get(compound, 0) + n
     _schedule_flush()
 
@@ -443,8 +520,9 @@ def _bump_tool_stat(tool_name: str, key: str, n: int = 1) -> None:
 def _flush_stats() -> None:
     """Merge in-memory pending stats into the persistent state file.
 
-    Compound pending keys of the form ``stat:tool`` (from _bump_tool_stat)
-    are routed into ``stats.per_tool[tool][stat]``.
+    Compound pending keys of the form ``stat<US>tool`` (from _bump_tool_stat)
+    are routed into ``stats.per_tool[tool][stat]``. The US separator is an
+    ASCII control character (0x1F) that cannot appear in a JSON object key.
     """
     with _stats_lock:
         if not _pending_stats:
@@ -454,8 +532,8 @@ def _flush_stats() -> None:
     try:
         def update(s):
             for k, v in pending.items():
-                if ":" in k:
-                    stat_key, tool = k.split(":", 1)
+                if _PER_TOOL_SEP in k:
+                    stat_key, tool = k.split(_PER_TOOL_SEP, 1)
                     s["stats"].setdefault("per_tool", {})
                     s["stats"]["per_tool"].setdefault(tool, {})
                     s["stats"]["per_tool"][tool][stat_key] = (
@@ -545,11 +623,22 @@ _ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "filepath": "path",
         "filename": "path",
         "file": "path",
-        "diff": "patch_string",
-        "patch": "patch_string",
-        "replacement": "patch_string",
-        "content": "patch_string",
-        "original": "patch_string",
+        # patch-mode body: the live schema field is `patch`, not
+        # `patch_string`. Map common hallucinations toward the canonical
+        # name. (Note: `content` is intentionally NOT mapped here because
+        # write_file uses `content`; mapping it would mis-route mixed-mode
+        # mistakes.)
+        "diff": "patch",
+        "patch_string": "patch",
+        "patch_content": "patch",
+        # replace-mode fields
+        "old": "old_string",
+        "original": "old_string",
+        "find": "old_string",
+        "search": "old_string",
+        "new": "new_string",
+        "replacement": "new_string",
+        "replace": "new_string",
     },
     "search_files": {
         "regex": "pattern",
@@ -605,7 +694,7 @@ _ARG_SYNONYM_GROUPS: List[frozenset] = [
     frozenset({"action", "operation", "verb"}),
     frozenset({"offset", "start", "start_line"}),
     frozenset({"limit", "lines", "limit_lines", "n", "count"}),
-    frozenset({"file_glob", "glob", "include", "include_pattern", "file_pattern", "Includes"}),
+    frozenset({"file_glob", "glob", "include", "include_pattern", "file_pattern"}),
 ]
 
 
@@ -634,24 +723,67 @@ def _normalize_key(key: str) -> str:
     return key.lower().replace("_", "").replace("-", "")
 
 
+def _repair_smart_quotes(value: Any) -> Tuple[Any, bool]:
+    """Recursively translate curly quotes inside dicts/lists/strings.
+
+    Returns (new_value, changed). Non-string scalars are returned unchanged.
+    The recursion is bounded by _FINGERPRINT_MAX_DEPTH so cyclic / runaway
+    structures cannot wedge the repair pass.
+    """
+    def _walk(v: Any, depth: int, seen: set) -> Tuple[Any, bool]:
+        if depth >= _FINGERPRINT_MAX_DEPTH:
+            return v, False
+        if isinstance(v, str):
+            t = v.translate(_SMART_QUOTE_MAP)
+            return (t, t != v)
+        if isinstance(v, dict):
+            if id(v) in seen:
+                return v, False
+            seen = seen | {id(v)}
+            changed = False
+            for k, sub in list(v.items()):
+                new_sub, c = _walk(sub, depth + 1, seen)
+                if c:
+                    v[k] = new_sub
+                    changed = True
+            return v, changed
+        if isinstance(v, list):
+            if id(v) in seen:
+                return v, False
+            seen = seen | {id(v)}
+            changed = False
+            for i, sub in enumerate(v):
+                new_sub, c = _walk(sub, depth + 1, seen)
+                if c:
+                    v[i] = new_sub
+                    changed = True
+            return v, changed
+        return v, False
+    return _walk(value, 0, set())
+
+
 def _repair_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
     """Silently rename misnamed args and fix smart quotes; return list of fixes applied.
 
     Three passes:
-      0) Universal Smart-Quote Repair: Fixes curly quotes in all string args.
+      0) Universal Smart-Quote Repair: Fixes curly quotes anywhere in args,
+         including nested lists/dicts (e.g. todos[].content).
       1) Hand-rolled per-tool overrides in _ARG_ALIASES.
       2) Schema-driven fuzzy repair: Matches by case-insensitivity, normalization
          (stripping _/-), and synonym groups.
     """
     fixes: List[str] = []
 
-    # Pass 0 — Smart Quote Repair
-    for k, v in args.items():
-        if isinstance(v, str):
-            translated = v.translate(_SMART_QUOTE_MAP)
-            if translated != v:
-                args[k] = translated
-                fixes.append(f"smart-quotes in {k}")
+    # Pass 0 — Smart Quote Repair (recursive into nested dicts/lists so a
+    # `todo(todos=[{"content": "“x”"}])` call gets fixed too). Nested
+    # containers are mutated in place; immutable top-level strings need an
+    # explicit write-back.
+    for k, v in list(args.items()):
+        new_v, changed = _repair_smart_quotes(v)
+        if changed:
+            if isinstance(v, str):
+                args[k] = new_v
+            fixes.append(f"smart-quotes in {k}")
 
     # Pass 1 — explicit table.
     aliases = _ARG_ALIASES.get(tool_name) or {}
@@ -833,18 +965,22 @@ def _looks_like_error(result: Any, tool_name: str = "") -> bool:
     if isinstance(parsed, dict):
         if parsed.get("error"):
             return True
-        if "exit_code" in parsed and parsed["exit_code"] != 0:
-            return True
-        if "exitCode" in parsed and parsed["exitCode"] != 0:
-            return True
+        # Honor an explicit successful exit code before scanning stderr,
+        # because well-behaved CLIs (gcc warnings, ffmpeg banners, npm
+        # peer-dep notices) write to stderr while still exiting 0. Treating
+        # those as errors poisons the error-streak counter and triggers
+        # spurious next-turn hints.
+        if "exit_code" in parsed:
+            if parsed["exit_code"] != 0:
+                return True
+            return False
+        if "exitCode" in parsed:
+            if parsed["exitCode"] != 0:
+                return True
+            return False
         stderr = parsed.get("stderr")
         if isinstance(stderr, str) and stderr.strip():
             return True
-        # If exit_code/exitCode is explicitly 0, it's NOT an error
-        if "exit_code" in parsed and parsed["exit_code"] == 0:
-            return False
-        if "exitCode" in parsed and parsed["exitCode"] == 0:
-            return False
 
     # Coerce to string for signature checks
     result_text = _result_to_text(result)
@@ -922,6 +1058,14 @@ _FIRST_USER_MSG_CAP = 1500    # cap re-anchor goal to 1.5k to avoid payload bloa
 _DYM_MAX_DIR_ENTRIES = 5000   # sample at most this many dir entries for DYM
 _DYM_MAX_CANDIDATES = 500     # cap difflib candidate list for better latency
 
+# Per-nudge-kind throttle (Bug #2 fix: were referenced but never defined).
+# After a kind hits the per-window limit, suppress further emits of the same
+# kind for the next _NUDGE_WINDOW_TURNS user turns. "3 in 5 turns" mirrors
+# the cadence of how often a model can re-trip the same failure mode before
+# a longer intervention is warranted.
+_NUDGE_WINDOW_TURNS = 5
+_NUDGE_LIMIT_PER_WINDOW = 3
+
 # Recent events across ended sessions.
 _global_events: Deque[Dict[str, Any]] = deque(maxlen=_EVENT_CAP)
 
@@ -964,22 +1108,44 @@ _registered_alias_tool_names: set = set()
 _last_log_entry: Optional[Tuple[str, str, float]] = None
 
 
-def _fingerprint_value(key: str, value: Any) -> Any:
+_FINGERPRINT_MAX_DEPTH = 32  # Issue #10: cycle / depth guard for fingerprinting.
+
+def _fingerprint_value(key: str, value: Any,
+                        _seen: Optional[set] = None,
+                        _depth: int = 0) -> Any:
     """Normalize an arg value for stable loop fingerprints.
 
     Large strings are represented by full-content digests instead of being
     truncated. Truncation made two different long commands look identical when
     they only diverged after the cutoff.
+
+    Issue #10 fix: now protected against cycles and runaway depth. A cyclic
+    ``args`` dict (theoretically possible if the framework constructs args
+    programmatically rather than parsing JSON) used to recurse forever;
+    callers in ``_args_fingerprint`` would then catch ``RecursionError``
+    with no useful diagnostic. We now short-circuit on the first repeat
+    using an id-set and bail out via a depth limit.
     """
+    if _depth >= _FINGERPRINT_MAX_DEPTH:
+        return {"__depth_cap__": True}
     if isinstance(value, str):
         if key in {"content", "patch"} or len(value) > 512:
             digest = hashlib.sha1(value.encode("utf-8", "replace")).hexdigest()
             return {"__sha1__": digest, "len": len(value)}
         return value
+    # Issue #10: track visited object ids so a cycle becomes a sentinel,
+    # not an infinite recursion.
+    if _seen is None:
+        _seen = set()
+    if isinstance(value, (dict, list, tuple)):
+        if id(value) in _seen:
+            return {"__cycle__": True}
+        _seen = _seen | {id(value)}
     if isinstance(value, dict):
-        return {str(k): _fingerprint_value(str(k), v) for k, v in value.items()}
+        return {str(k): _fingerprint_value(str(k), v, _seen, _depth + 1)
+                for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_fingerprint_value(key, v) for v in value]
+        return [_fingerprint_value(key, v, _seen, _depth + 1) for v in value]
     return value
 
 
@@ -1070,16 +1236,22 @@ def _record_event(session_id: str, kind: str, detail: str, **fields: Any) -> Non
         _global_events.append(event)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        with _event_log_lock:
-            now = time.time()
+        # Issue #8 fix: rotation runs under a per-file lock, not the shared
+        # correction-log lock, so writes to events.jsonl don't block on
+        # corrections.log rotations (and vice versa).
+        with _event_rotate_lock:
             global _last_rotation_check
+            now = time.time()
             if (now - _last_rotation_check) > 10.0:
-                _rotate_file(EVENT_LOG_FILE)
+                _rotate_file(EVENT_LOG_FILE, lock=_event_rotate_lock)
                 _last_rotation_check = now
+        with _event_log_lock:
             with EVENT_LOG_FILE.open("a") as f:
                 f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
-    except Exception:
-        pass
+    except Exception as exc:
+        # Issue #16 improvement: log swallowed exceptions so a silent failure
+        # leaves a trail. Was previously `except Exception: pass`.
+        logger.debug("model-sherpa: failed to persist event %s: %s", event.get("kind"), exc)
 
 
 def _load_recent_events_from_disk(session_id: Optional[str], n: int) -> List[Dict[str, Any]]:
@@ -1181,6 +1353,14 @@ _MULTISTEP_HINTS = re.compile(
     re.I,
 )
 
+# Bug #5 fix: a corrected bullet/numbered-list detector. The old code used
+# `\+` which matched a literal `+` — almost nothing a user types. The
+# `re.M` flag is baked into the compiled pattern for clarity.
+_BULLET_RE = re.compile(
+    r"^\s*(?:[-*•]|\d+[.)])\s+\S",
+    re.M,
+)
+
 
 def _is_multistep_request(msg: str) -> bool:
     if not msg:
@@ -1193,8 +1373,9 @@ def _is_multistep_request(msg: str) -> bool:
         return True
     if _MULTISTEP_HINTS.search(msg):
         return True
-    # Numbered/bulleted list (≥2 items)
-    bullets = re.findall(r"^\s*(?:[-*•]|\d+[.)])\s+\+\S", msg, re.M)
+    # Numbered/bulleted list (≥2 items). See _BULLET_RE for the corrected
+    # pattern (Bug #5).
+    bullets = _BULLET_RE.findall(msg)
     return len(bullets) >= 2
 
 
@@ -1239,7 +1420,7 @@ def _didyoumean_path(path: str) -> Optional[str]:
             for entry in it:
                 entries_seen += 1
                 siblings.append(entry.name)
-                if entries_seen >= _DYM_MAX_DIR_ENTRIES:
+                if entries_seen >= _DYM_MAX_CANDIDATES:
                     break
     except OSError:
         return None
@@ -1518,6 +1699,7 @@ def _lint_terminal_command(
             # variable expansions, escapes, or brace expansions that require a shell.
             if inner.strip() and not re.search(r"[;&|<>$`\\{}]", inner):
                 command = inner
+                fix_count += 1
             else:
                 # Complex inner command — warn instead.
                 warnings.append(
@@ -1775,7 +1957,14 @@ def _pre_tool_call(
     tool_call_id: str = "",
     **_: Any,
 ) -> Optional[Dict[str, str]]:
-    """Silent arg rewrite, arg-guard block, redundant-read block."""
+    """Silent arg rewrite, arg-guard block, redundant-read block.
+
+    Return contract: ``None`` means "no change" — let the framework dispatch
+    the call as-is. A dict ``{"action": "block", "message": str}`` means
+    "abort the call; show ``message`` to the model". This contract is part
+    of Hermes' pre-tool-call interface and should not change without
+    coordinating with the framework.
+    """
     state = _load_state()
     if not state.get("enabled") or not isinstance(args, dict):
         return None
@@ -2138,9 +2327,14 @@ def _cleanup_stale_sessions() -> None:
     
     global _cleanup_timer
     with _timer_lock:
-        _cleanup_timer = threading.Timer(_CLEANUP_INTERVAL, _cleanup_stale_sessions)
-        _cleanup_timer.daemon = True
-        _cleanup_timer.start()
+        with _session_lock:
+            sessions_left = _all_session_ids()
+        if sessions_left:
+            _cleanup_timer = threading.Timer(_CLEANUP_INTERVAL, _cleanup_stale_sessions)
+            _cleanup_timer.daemon = True
+            _cleanup_timer.start()
+        else:
+            _cleanup_timer = None
 
 
 def _ensure_cleanup_task() -> None:
@@ -2182,7 +2376,11 @@ def _clear_all_sessions() -> None:
 
 
 def _on_session_start(session_id: str = "", **_: Any) -> None:
-    _clear_session(session_id or "default")
+    sid = session_id or "default"
+    _clear_session(sid)
+    with _session_lock:
+        _last_access[sid] = time.time()
+    _ensure_cleanup_task()
 
 
 def _on_session_end(session_id: str = "", **_: Any) -> None:
@@ -2193,7 +2391,10 @@ def _on_session_end(session_id: str = "", **_: Any) -> None:
     with _session_lock:
         sessions_left = _all_session_ids()
     if not sessions_left:
-        global _flush_timer, _periodic_flush_timer
+        # Bug #4 fix: _cleanup_timer must be in the global declaration. Without
+        # it, the assignment on the next line makes Python treat the function's
+        # _cleanup_timer as a local, and the prior read raises UnboundLocalError.
+        global _flush_timer, _periodic_flush_timer, _cleanup_timer
         with _timer_lock:
             if _flush_timer is not None:
                 _flush_timer.cancel()
@@ -2239,29 +2440,33 @@ def _alias_handler(real_tool: str,
                     real_args.setdefault(k, v)
         _bump_tool_stat(real_tool, "aliases_used")
         _log_correction("alias", f"alias→{real_tool} args={list(real_args.keys())}")
+        # Import the dispatcher first; only fall back when it is *unavailable*
+        # (e.g. unit tests with a stub registry). If the real dispatch itself
+        # raises after partial side-effects, retrying via reg.dispatch would
+        # double-execute terminal/write tools — so dispatch errors must
+        # propagate, not trigger the fallback.
         try:
             from model_tools import handle_function_call
-            return handle_function_call(
-                real_tool, real_args,
-                task_id=kw.get("task_id"),
-                tool_call_id=kw.get("tool_call_id"),
-                session_id=kw.get("session_id"),
-                user_task=kw.get("user_task"),
-            )
-        except Exception as exc:
+        except ImportError as exc:
             logger.debug(
                 "model-sherpa: handle_function_call unavailable for alias %s "
-                "→ %s (%s); falling back to registry.dispatch", real_tool,
-                real_tool, exc,
+                "(%s); falling back to registry.dispatch", real_tool, exc,
             )
             reg = _registry()
             if reg is None:
-                return json.dumps({"error": f"alias dispatch failed: {exc}"})
+                return json.dumps({"error": f"alias dispatch unavailable: {exc}"})
             return reg.dispatch(
                 real_tool, real_args,
                 task_id=kw.get("task_id"),
                 user_task=kw.get("user_task"),
             )
+        return handle_function_call(
+            real_tool, real_args,
+            task_id=kw.get("task_id"),
+            tool_call_id=kw.get("tool_call_id"),
+            session_id=kw.get("session_id"),
+            user_task=kw.get("user_task"),
+        )
     return handler
 
 
@@ -2310,36 +2515,44 @@ _ALIAS_SPECS: List[Dict[str, Any]] = [
     # bash / shell family → terminal
     {"name": "bash", "real": "terminal", "toolset": "terminal",
      "desc": "Alias of `terminal`. Runs a shell command.",
-     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS},
+     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
+     "required": ["command"]},
     {"name": "shell", "real": "terminal", "toolset": "terminal",
      "desc": "Alias of `terminal`. Runs a shell command.",
-     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS},
+     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
+     "required": ["command"]},
     {"name": "sh", "real": "terminal", "toolset": "terminal",
      "desc": "Alias of `terminal`. Runs a shell command.",
-     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS},
+     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
+     "required": ["command"]},
     {"name": "exec", "real": "terminal", "toolset": "terminal",
      "desc": "Alias of `terminal`. Runs a shell command.",
-     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS},
+     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
+     "required": ["command"]},
     # cat → read_file
     {"name": "cat", "real": "read_file", "toolset": "file",
      "desc": "Alias of `read_file`. Reads a text file.",
      "schema_params": {"path": {"type": "string", "description": "File path"}},
-     "arg_map": {"path": "path", "file": "path", "filename": "path"}},
-    # head / tail → terminal (literal command)
+     "arg_map": {"path": "path", "file": "path", "filename": "path"},
+     "required": ["path"]},
+    # head / tail → terminal (literal command).
+    # `path` is required; `n` defaults to 10 in _build_head_command/_build_tail_command.
     {"name": "head", "real": "terminal", "toolset": "terminal",
      "desc": "Alias that runs `head -n N PATH` via terminal.",
      "schema_params": {
         "path": {"type": "string", "description": "File path"},
         "n":    {"type": "integer", "description": "Number of lines (default 10)"},
      },
-     "build_command": _build_head_command},
+     "build_command": _build_head_command,
+     "required": ["path"]},
     {"name": "tail", "real": "terminal", "toolset": "terminal",
      "desc": "Alias that runs `tail -n N PATH` via terminal.",
      "schema_params": {
         "path": {"type": "string", "description": "File path"},
         "n":    {"type": "integer", "description": "Number of lines (default 10)"},
      },
-     "build_command": _build_tail_command},
+     "build_command": _build_tail_command,
+     "required": ["path"]},
     # grep / rg / egrep → search_files (content)
     {"name": "grep", "real": "search_files", "toolset": "file",
      "desc": "Alias of `search_files`. Searches file contents.",
@@ -2349,7 +2562,8 @@ _ALIAS_SPECS: List[Dict[str, Any]] = [
      },
      "arg_map": {"pattern": "pattern", "path": "path", "regex": "pattern",
                  "query": "pattern", "directory": "path"},
-     "fixed":   {"target": "content"}},
+     "fixed":   {"target": "content"},
+     "required": ["pattern"]},
     {"name": "rg", "real": "search_files", "toolset": "file",
      "desc": "Alias of `search_files`. Ripgrep-style content search.",
      "schema_params": {
@@ -2358,7 +2572,8 @@ _ALIAS_SPECS: List[Dict[str, Any]] = [
      },
      "arg_map": {"pattern": "pattern", "path": "path", "regex": "pattern",
                  "query": "pattern", "directory": "path"},
-     "fixed":   {"target": "content"}},
+     "fixed":   {"target": "content"},
+     "required": ["pattern"]},
     {"name": "egrep", "real": "search_files", "toolset": "file",
      "desc": "Alias of `search_files`. Extended regex content search.",
      "schema_params": {
@@ -2366,7 +2581,8 @@ _ALIAS_SPECS: List[Dict[str, Any]] = [
         "path":    {"type": "string", "description": "Directory or file to search"},
      },
      "arg_map": {"pattern": "pattern", "path": "path"},
-     "fixed":   {"target": "content"}},
+     "fixed":   {"target": "content"},
+     "required": ["pattern"]},
     # find → search_files (files)
     {"name": "find", "real": "search_files", "toolset": "file",
      "desc": "Alias of `search_files target='files'`. Finds files by name.",
@@ -2376,15 +2592,18 @@ _ALIAS_SPECS: List[Dict[str, Any]] = [
      },
      "arg_map": {"pattern": "pattern", "path": "path", "name": "pattern",
                  "glob": "pattern"},
-     "fixed":   {"target": "files"}},
-    # ls → terminal (literal command, since ls flags vary)
+     "fixed":   {"target": "files"},
+     "required": ["pattern"]},
+    # ls → terminal (literal command, since ls flags vary).
+    # `path` is intentionally NOT required: _build_ls_command defaults to ".".
     {"name": "ls", "real": "terminal", "toolset": "terminal",
      "desc": "Alias that runs `ls -la PATH` via terminal.",
      "schema_params": {
         "path": {"type": "string", "description": "Directory to list (default .)"},
         "long": {"type": "boolean", "description": "Pass -la"},
      },
-     "build_command": _build_ls_command},
+     "build_command": _build_ls_command,
+     "required": []},
     # skill → skill_view
     {"name": "skill", "real": "skill_view", "toolset": "skills",
      "desc": "Alias of `skill_view`. Loads a saved skill.",
@@ -2393,7 +2612,8 @@ _ALIAS_SPECS: List[Dict[str, Any]] = [
         "file_path": {"type": "string", "description": "Optional file within the skill"},
      },
      "arg_map": {"name": "name", "skill": "name", "skill_name": "name",
-                 "file_path": "file_path", "path": "file_path"}},
+                 "file_path": "file_path", "path": "file_path"},
+     "required": ["name"]},
 ]
 
 _SOFT_ALIAS_TARGETS = {spec["name"]: spec["real"] for spec in _ALIAS_SPECS}
@@ -2415,6 +2635,13 @@ def _register_aliases(ctx) -> int:
         if name in existing:
             logger.debug("model-sherpa: %s already registered, skipping alias", name)
             continue
+        # Per-spec required list. Falls back to the first declared parameter
+        # only when a spec doesn't declare one — but every spec in
+        # _ALIAS_SPECS now sets `required` explicitly, including `ls`
+        # which uses [] because _build_ls_command defaults `path` to ".".
+        required = spec.get("required")
+        if required is None:
+            required = list(spec["schema_params"].keys())[:1]
         schema = {
             "name": name,
             "description": "[sherpa alias] " + spec["desc"] +
@@ -2422,7 +2649,7 @@ def _register_aliases(ctx) -> int:
             "parameters": {
                 "type": "object",
                 "properties": spec["schema_params"],
-                "required": list(spec["schema_params"].keys())[:1],
+                "required": list(required),
             },
         }
         handler = _alias_handler(
@@ -2520,7 +2747,7 @@ def _doctor_report() -> str:
         "skill_view": {"name", "file_path"},
         "read_file": {"path", "offset", "limit"},
         "search_files": {"pattern", "target", "path"},
-        "patch": {"mode", "path", "old_string", "new_string", "patch", "patch_string"},
+        "patch": {"mode", "path", "old_string", "new_string", "patch"},
     }
     for tool, expected in expected_schema_keys.items():
         if tool not in names:
