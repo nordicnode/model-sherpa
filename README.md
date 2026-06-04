@@ -1,4 +1,5 @@
-# 🏔️ model-sherpa
+# Model Sherpa
+
 > **The ultimate guide-rails and sentinel layer for LLM agents.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -9,53 +10,46 @@
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 Sherpa sits as a transparent middleware between the LLM and the Hermes Tool Registry. It intercepts every hook to apply heuristic and schema-based corrections.
 
-```mermaid
-graph TD
-    User([User Request]) --> Agent[Hermes Agent]
-    Agent -->|1. Pre-LLM Hook| Sherpa{model-sherpa}
-    Sherpa -->|Inject Nudges/Cheatsheets| Agent
-    Agent -->|2. Tool Call| Sherpa
-    Sherpa -->|Arg Guard / Repair| Tool[Tool Registry]
-    Tool -->|3. Result| Sherpa
-    Sherpa -->|Read Damper / Redaction| Agent
-    Agent -->|4. Response| User
-```
+The middleware coordinates interactions during several distinct phases:
+1. **Pre-LLM Hook**: Injects nudges and cheatsheets into the context before the LLM generates a response.
+2. **Tool Call Hook**: Intercepts outgoing tool calls to perform silent schema validation and argument repair.
+3. **Result Hook / Post-Tool Hook**: Monitors tool results to detect looping patterns, apply error-pattern hints, and redact sensitive substrings.
 
 ---
 
-## 🚀 Key Guide-Rails
+## Key Guide-Rails
 
-### 🛡️ Arg Guard & Universal Repair
-The **Arg Guard** is your first line of defense against model "fumbles."
+### Arg Guard and Universal Repair
+The **Arg Guard** is the first line of defense against model parameter fumbles.
 - **Schema Validation**: Intercepts tool calls and validates them against their JSON schema before execution.
 - **Smart-Quote Repair**: Automatically converts curly quotes (`“path.txt”`) to standard ASCII, fixing a common LLM copy-paste error.
 - **Fuzzy Normalization**: Maps hallucinatory keys (e.g., `file_path` or `file-path`) to the canonical schema key (`path`) automatically.
 - **`patch` Specialist**: Dedicated repair logic for the `patch` tool, mapping `diff` or `original` to `patch_string`.
 
-### 🕵️ Sequence Loop Detection (SLD)
+### Sequence Loop Detection (SLD)
 Standard repetition counters miss the most expensive failure mode: **Rhythmic Thrashing**. Sherpa detects:
 - **Simple Repeats**: $A \rightarrow A \rightarrow A$
 - **Ping-Pong Loops**: $A \rightarrow B \rightarrow A \rightarrow B$
 - **Complex Cycles**: $A \rightarrow B \rightarrow C \rightarrow A \rightarrow B \rightarrow C$
 When detected, Sherpa injects a "Loop Nudge" into the model's context, forcing it to pivot strategy before it burns through the token budget.
 
-### 📉 Smart Read Range Damping
+### Smart Read Range Damping
 Traditional dampers block the same file twice. Sherpa's **Read Damper** is range-aware:
 - **Paging Support**: Allows the model to page through a file sequentially (e.g., Lines 1-100, then 101-200).
 - **Subset Detection**: Blocks a read only if the requested lines are **already contained** within a previously read range in the same turn.
 
-### 🔐 Zero-Trust Telemetry
+### Zero-Trust Telemetry
 Sherpa is built for privacy-conscious environments:
 - **Substring Redaction**: Masks `api_key`, `token`, `password`, and `secret` in all logs, even if they are part of a larger key (e.g., `github_token_v2`).
 - **Binary Safeguards**: Automatically summarizes non-UTF8 data (`<binary data: 1.2MB>`) to prevent context window pollution.
 
 ---
 
-## ⌨️ Slash Commands
+## Slash Commands
 
 | Command | Description |
 | :--- | :--- |
@@ -67,7 +61,7 @@ Sherpa is built for privacy-conscious environments:
 
 ---
 
-## 🛠️ Advanced Configuration
+## Advanced Configuration
 
 ### Custom Hints Engine
 You can extend Sherpa's recovery logic via the `custom_hints` array in `state.json`. These are matched using a high-performance, cached regex engine.
@@ -85,14 +79,14 @@ You can extend Sherpa's recovery logic via the `custom_hints` array in `state.js
 
 ---
 
-## ⚡ Engineering & Performance
+## Engineering and Performance
 - **Atomic Transactions**: Uses `fcntl` cross-process locking and atomic `replace()` to ensure state integrity across multiple Hermes instances.
 - **Minimal Latency**: Implements multi-level caching for disk stats and regex patterns. Post-tool hooks are benchmarked to add < 1ms of overhead.
 - **Startup Stability**: Uses non-blocking locks to ensure the CLI never hangs, even if the state file is contested.
 
 ---
 
-## 🛠️ Development
+## Development
 
 This plugin ships with a smoke test suite and a `Makefile` for quick local checks.
 
@@ -108,12 +102,9 @@ make test
 make check
 ```
 
-The `make lint` target runs `pyflakes` against `__init__.py` — the same
-static analysis that uncovered four of the five critical bugs in the
-v0.3.0 review. It is strongly recommended to run `make lint` before opening a PR.
+The `make lint` target runs `pyflakes` against `__init__.py` — the same static analysis that uncovered four of the five critical bugs in the v0.3.0 review. It is strongly recommended to run `make lint` before opening a PR.
 
-Tests live in `tests/test_smoke.py` and use a temporary `HERMES_HOME`
-so they never touch the real user's state. They cover:
+Tests live in `tests/test_smoke.py` and use a temporary `HERMES_HOME` so they never touch the real user's state. They cover:
 
 - The five regression bugs from the v0.3.0 review
 - Loop detection end-to-end (`_post_tool_call` → `_queue_nudge`)
@@ -131,5 +122,5 @@ so they never touch the real user's state. They cover:
 
 ---
 
-## 📜 License
+## License
 MIT License.
