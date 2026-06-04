@@ -10,6 +10,16 @@
 
 ---
 
+## Installation
+
+Install the plugin directly via the Hermes Agent CLI:
+
+```bash
+hermes plugins install nordicnode/model-sherpa
+```
+
+---
+
 ## System Architecture
 
 Sherpa sits as a transparent middleware between the LLM and the Hermes Tool Registry. It intercepts every hook to apply heuristic and schema-based corrections.
