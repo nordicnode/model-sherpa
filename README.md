@@ -12,10 +12,18 @@
 
 ## Installation
 
+### Automated Installation
 Install the plugin directly via the Hermes Agent CLI:
 
 ```bash
 hermes plugins install nordicnode/model-sherpa
+```
+
+### Manual Installation
+Alternatively, clone the repository directly into your Hermes plugins directory:
+
+```bash
+git clone https://github.com/nordicnode/model-sherpa.git ~/.hermes/plugins/model-sherpa
 ```
 
 ---
