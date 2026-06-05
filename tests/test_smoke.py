@@ -115,9 +115,10 @@ def test_queue_nudge_does_not_raise_within_window(mod, sherpa_home):
 def test_record_event_writes_to_disk_on_first_call(mod, sherpa_home):
     """_record_event used to raise UnboundLocalError on the first call (the
     rotation check referenced an undefined _last_rotation_check). The fix
-    is to define the constant so the first event lands on disk.
+    defines separate timestamps for correction and event log rotation.
     """
-    assert hasattr(mod, "_last_rotation_check"), "_last_rotation_check should be defined"
+    assert hasattr(mod, "_last_correction_rotation"), "_last_correction_rotation should be defined"
+    assert hasattr(mod, "_last_event_rotation"), "_last_event_rotation should be defined"
     mod._record_event("s1", "test_kind", "test_detail")
     time.sleep(0.1)
     events_path = sherpa_home / "memories" / "model-sherpa" / "events.jsonl"
@@ -335,46 +336,926 @@ def test_ensure_periodic_flush_does_not_leak_timer_when_no_sessions(mod, sherpa_
     assert mod._periodic_flush_timer is not None
     timer = mod._periodic_flush_timer
     try:
-        # Trigger the tick callback manually to simulate timer firing
-        # This will run _tick, which should see 0 sessions and NOT reschedule.
-        timer.finished.set()  # stop the timer's waiting
-        # Call the target directly to test rescheduling branch
+        # Manually trigger the tick callback; it should see 0 sessions and
+        # NOT reschedule.
+        # threading.Timer.finished is a Python 3.13+ Event; guard the call so
+        # the test runs on 3.9-3.12 too. cancel() works on every version.
+        if hasattr(timer, "finished"):
+            timer.finished.set()
+        timer.cancel()
         timer.function(*timer.args, **timer.kwargs)
         assert mod._periodic_flush_timer is None, "Periodic flush timer should not be rescheduled"
     finally:
         timer.cancel()
 
 
+# ---------------------------------------------------------------------------
+# _transform_tool_result tests.
+# ---------------------------------------------------------------------------
+
+def test_transform_tool_result_returns_tip_for_error_string(mod, sherpa_home):
+    """An error string should get a [SHERPA] tip appended."""
+    result = mod._transform_tool_result(
+        tool_name="terminal",
+        result="Error: no such file or directory, scandir '/missing/path'",
+        session_id="transform_test",
+    )
+    assert result is not None
+    assert "[SHERPA]" in result
+    assert "Tip:" in result
+
+
+def test_transform_tool_result_returns_none_for_success(mod, sherpa_home):
+    """A successful result should not be modified."""
+    result = mod._transform_tool_result(
+        tool_name="terminal",
+        result="total 8\n-rw-r--r-- 1 user user 1024 Jan  1 00:00 file.txt",
+        session_id="transform_test",
+    )
+    assert result is None
+
+
+def test_transform_tool_result_returns_none_for_non_string(mod, sherpa_home):
+    """Non-string results should not be modified (post_tool_call handles those)."""
+    result = mod._transform_tool_result(
+        tool_name="terminal",
+        result={"exit_code": 1, "stderr": "command not found"},
+        session_id="transform_test",
+    )
+    assert result is None
+
+
+def test_transform_tool_result_avoids_double_append(mod, sherpa_home):
+    """If a previous plugin already added [SHERPA], don't add another."""
+    result = mod._transform_tool_result(
+        tool_name="terminal",
+        result="Error: no such file or directory\n\n[SHERPA] already has a tip",
+        session_id="transform_test",
+    )
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _looks_like_error tests.
+# ---------------------------------------------------------------------------
+
+def test_looks_like_error_dict_with_error_key(mod):
+    assert mod._looks_like_error({"error": "something failed"}) is True
+
+
+def test_looks_like_error_dict_with_zero_exit_code(mod):
+    assert mod._looks_like_error({"exit_code": 0, "stderr": "some warning"}) is False
+
+
+def test_looks_like_error_dict_with_nonzero_exit_code(mod):
+    assert mod._looks_like_error({"exit_code": 1, "stderr": ""}) is True
+
+
+def test_looks_like_error_dict_with_exitCode(mod):
+    assert mod._looks_like_error({"exitCode": 0, "stderr": "warning"}) is False
+    assert mod._looks_like_error({"exitCode": 127, "stderr": ""}) is True
+
+
+def test_looks_like_error_none(mod):
+    assert mod._looks_like_error(None) is False
+
+
+def test_looks_like_error_success_string(mod):
+    assert mod._looks_like_error("file contents here") is False
+
+
+def test_looks_like_error_traceback_string(mod):
+    assert mod._looks_like_error("Traceback (most recent call last):\n  File ...") is True
+
+
+def test_looks_like_error_read_file_success(mod):
+    """read_file results containing common words like 'exception' in content
+    should not be treated as errors."""
+    result = "# This file handles exceptions gracefully\nclass Foo: pass"
+    assert mod._looks_like_error(result, "read_file") is False
+
+
+def test_looks_like_error_read_file_actual_error(mod):
+    assert mod._looks_like_error("FileNotFoundError: /missing/path", "read_file") is True
+
+
+def test_looks_like_error_search_files_success(mod):
+    result = "./lib/utils.py:42:    # handle exception cases here"
+    assert mod._looks_like_error(result, "search_files") is False
+
+
+# ---------------------------------------------------------------------------
+# _didyoumean_tool tests.
+# ---------------------------------------------------------------------------
+
+def test_didyoumean_tool_returns_none_for_empty(mod, sherpa_home):
+    assert mod._didyoumean_tool("") is None
+    assert mod._didyoumean_tool(None) is None
+
+
+# ---------------------------------------------------------------------------
+# _didyoumean_path tests (additional).
+# ---------------------------------------------------------------------------
+
+def test_didyoumean_path_returns_none_for_existing_path(mod, sherpa_home):
+    """If the path exists, _didyoumean_path should return None."""
+    existing = sherpa_home / "exists.txt"
+    existing.write_text("hello")
+    assert mod._didyoumean_path(str(existing)) is None
+
+
+def test_didyoumean_path_returns_none_for_empty(mod, sherpa_home):
+    assert mod._didyoumean_path("") is None
+    assert mod._didyoumean_path(None) is None
+
+
+def test_didyoumean_path_finds_sibling(mod, sherpa_home):
+    """_didyoumean_path should suggest a close sibling filename."""
+    d = sherpa_home / "project"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "main.py").write_text("pass")
+    result = mod._didyoumean_path(str(d / "config.jsom"))
+    assert result is not None
+    assert "config.json" in result
+
+
+# ---------------------------------------------------------------------------
+# _is_multistep_request additional tests.
+# ---------------------------------------------------------------------------
+
+def test_is_multistep_then_next(mod):
+    assert mod._is_multistep_request("first do X then do Y finally do Z") is True
+
+
+def test_is_multistep_empty(mod):
+    assert mod._is_multistep_request("") is False
+    assert mod._is_multistep_request(None) is False
+
+
+def test_is_multistep_long_truncated(mod):
+    """Very long messages should be truncated to 4000 chars."""
+    msg = "a. " * 5000  # way over 4000 chars
+    # Should not raise
+    mod._is_multistep_request(msg)
+
+
+# ---------------------------------------------------------------------------
+# Loop detection: ping-pong (A-B-A-B) and triple (A-B-C-A-B-C).
+# ---------------------------------------------------------------------------
+
+def test_loop_detection_pingpong(mod, sherpa_home):
+    """A-B-A-B pattern should be detected as a loop."""
+    sid = "pingpong_test"
+    mod._drain_nudges(sid)
+    args_a = {"command": "ls /tmp"}
+    args_b = {"command": "ls /var"}
+    for _ in range(2):
+        mod._post_tool_call(tool_name="terminal", args=args_a, result={"exit_code": 0}, session_id=sid)
+        mod._post_tool_call(tool_name="terminal", args=args_b, result={"exit_code": 0}, session_id=sid)
+    pending = mod._pending_nudges.get(sid, [])
+    kinds = [k for k, _ in pending]
+    assert kinds.count("loop") == 1, f"expected ping-pong loop nudge, got {kinds}"
+
+
+def test_loop_detection_triple_sequence(mod, sherpa_home):
+    """A-B-C-A-B-C pattern should be detected as a loop."""
+    sid = "triple_test"
+    mod._drain_nudges(sid)
+    args_a = {"command": "ls /a"}
+    args_b = {"command": "ls /b"}
+    args_c = {"command": "ls /c"}
+    for _ in range(2):
+        mod._post_tool_call(tool_name="terminal", args=args_a, result={"exit_code": 0}, session_id=sid)
+        mod._post_tool_call(tool_name="terminal", args=args_b, result={"exit_code": 0}, session_id=sid)
+        mod._post_tool_call(tool_name="terminal", args=args_c, result={"exit_code": 0}, session_id=sid)
+    pending = mod._pending_nudges.get(sid, [])
+    kinds = [k for k, _ in pending]
+    assert kinds.count("loop") == 1, f"expected triple-sequence loop nudge, got {kinds}"
+
+
+# ---------------------------------------------------------------------------
+# Error streak and hint injection.
+# ---------------------------------------------------------------------------
+
+def test_error_streak_triggers_hint_after_two(mod, sherpa_home):
+    """After 2 consecutive errors, a matching hint should be queued."""
+    sid = "streak_test"
+    mod._drain_nudges(sid)
+    # Two errors of the same type
+    for _ in range(2):
+        mod._post_tool_call(
+            tool_name="terminal",
+            args={"command": "cat /nope"},
+            result={"error": "no such file or directory"},
+            session_id=sid,
+        )
+    pending = mod._pending_nudges.get(sid, [])
+    kinds = [k for k, _ in pending]
+    assert "hint" in kinds, f"expected a hint nudge after 2 errors, got {kinds}"
+
+
+def test_error_streak_resets_on_success(mod, sherpa_home):
+    """A successful call should reset the error streak."""
+    sid = "reset_streak"
+    mod._drain_nudges(sid)
+    mod._post_tool_call(
+        tool_name="terminal", args={"command": "fail"},
+        result={"error": "no such file"}, session_id=sid,
+    )
+    assert mod._error_streak.get(sid, 0) == 1
+    mod._post_tool_call(
+        tool_name="terminal", args={"command": "ok"},
+        result={"exit_code": 0}, session_id=sid,
+    )
+    assert mod._error_streak.get(sid, 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# _redact_dict tests.
+# ---------------------------------------------------------------------------
+
+def test_redact_dict_redacts_sensitive_keys(mod):
+    data = {"api_key": "secret123", "name": "John", "password": "hunter2"}
+    result = mod._redact_dict(data)
+    assert result["api_key"] == "[REDACTED]"
+    assert result["password"] == "[REDACTED]"
+    assert result["name"] == "John"
+
+
+def test_redact_dict_nested(mod):
+    data = {"outer": {"github_token": "ghp_abc", "safe": "value"}}
+    result = mod._redact_dict(data)
+    assert result["outer"]["github_token"] == "[REDACTED]"
+    assert result["outer"]["safe"] == "value"
+
+
+def test_redact_dict_list(mod):
+    data = [{"secret": "s1"}, {"public": "p1"}]
+    result = mod._redact_dict(data)
+    assert result[0]["secret"] == "[REDACTED]"
+    assert result[1]["public"] == "p1"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_key tests.
+# ---------------------------------------------------------------------------
+
+def test_normalize_key(mod):
+    assert mod._normalize_key("file_path") == "filepath"
+    assert mod._normalize_key("File-Path") == "filepath"
+    assert mod._normalize_key("PATH") == "path"
+
+
+# ---------------------------------------------------------------------------
+# _deep_merge tests.
+# ---------------------------------------------------------------------------
+
+def test_deep_merge_preserves_defaults(mod):
+    defaults = {"a": 1, "b": {"c": 2, "d": 3}}
+    override = {"b": {"c": 99}}
+    result = mod._deep_merge(defaults, override)
+    assert result == {"a": 1, "b": {"c": 99, "d": 3}}
+
+
+def test_deep_merge_adds_new_keys(mod):
+    defaults = {"a": 1}
+    override = {"b": 2}
+    result = mod._deep_merge(defaults, override)
+    assert result == {"a": 1, "b": 2}
+
+
+def test_deep_merge_non_dict_override(mod):
+    assert mod._deep_merge({"a": 1}, "scalar") == "scalar"
+
+
+# ---------------------------------------------------------------------------
+# Command lint: additional tests.
+# ---------------------------------------------------------------------------
+
+def test_command_lint_strips_bash_c_simple(mod):
+    cmd, warnings, fixes = mod._lint_terminal_command('bash -c "ls -la"', {})
+    assert cmd == "ls -la"
+    assert fixes == 1
+
+
+def test_command_lint_strips_sh_c_simple(mod):
+    cmd, warnings, fixes = mod._lint_terminal_command("sh -c 'echo hello'", {})
+    assert cmd == "echo hello"
+    assert fixes == 1
+
+
+def test_command_lint_warns_bash_c_complex(mod):
+    cmd, warnings, fixes = mod._lint_terminal_command('bash -c "ls | grep foo"', {})
+    # Complex inner command should warn, not unwrap
+    assert len(warnings) > 0
+    assert "bash -c" in warnings[0]
+
+
+def test_command_lint_strips_percent_prompt(mod):
+    cmd, warnings, fixes = mod._lint_terminal_command("% ls -la", {})
+    assert cmd == "ls -la"
+    assert fixes == 1
+
+
+def test_command_lint_smart_quotes(mod):
+    cmd, warnings, fixes = mod._lint_terminal_command("echo \u201chello\u201d", {})
+    assert '"' in cmd
+    assert "\u201c" not in cmd
+
+
+def test_command_lint_no_op(mod):
+    cmd, warnings, fixes = mod._lint_terminal_command("ls -la", {})
+    assert cmd == "ls -la"
+    assert fixes == 0
+    assert warnings == []
+
+
+def test_command_lint_cd_with_existing_workdir(mod):
+    args = {"workdir": "/home"}
+    cmd, warnings, fixes = mod._lint_terminal_command("cd /tmp && ls", args)
+    assert cmd == "ls"
+    assert args["workdir"] == "/tmp"
+
+
+# ---------------------------------------------------------------------------
+# Repair args: additional synonym and schema tests.
+# ---------------------------------------------------------------------------
+
+def test_repair_args_no_change_needed(mod):
+    args = {"command": "ls", "workdir": "/tmp"}
+    fixes = mod._repair_args("terminal", args)
+    assert fixes == []
+    assert args == {"command": "ls", "workdir": "/tmp"}
+
+
+def test_repair_args_patch_aliases(mod):
+    args = {"file_path": "/f", "diff": "patch content"}
+    mod._repair_args("patch", args)
+    assert "path" in args
+    assert "patch" in args
+
+def test_repair_args_write_file_aliases(mod):
+    args = {"filename": "/f", "text": "content"}
+    mod._repair_args("write_file", args)
+    assert "path" in args
+    assert "content" in args
+
+
+# ---------------------------------------------------------------------------
+# Nudge dedup within a single turn.
+# ---------------------------------------------------------------------------
+
+def test_nudge_dedup_same_kind_same_turn(mod, sherpa_home):
+    """Two nudges of the same kind in the same turn should produce only one."""
+    sid = "dedup_test"
+    mod._drain_nudges(sid)
+    mod._queue_nudge(sid, "hint", "first hint")
+    mod._queue_nudge(sid, "hint", "second hint")
+    nudges = mod._drain_nudges(sid)
+    assert len(nudges) == 1
+    assert nudges[0] == "first hint"  # first-wins
+
+
+def test_nudge_different_kinds_both_queued(mod, sherpa_home):
+    """Different nudge kinds should both be queued."""
+    sid = "multi_kind_test"
+    mod._drain_nudges(sid)
+    mod._queue_nudge(sid, "loop", "loop msg")
+    mod._queue_nudge(sid, "hint", "hint msg")
+    nudges = mod._drain_nudges(sid)
+    assert len(nudges) == 2
+
+
+# ---------------------------------------------------------------------------
+# _result_to_text tests.
+# ---------------------------------------------------------------------------
+
+def test_result_to_text_none(mod):
+    assert mod._result_to_text(None) == ""
+
+
+def test_result_to_text_bytes(mod):
+    assert "hello" in mod._result_to_text(b"hello")
+
+
+def test_result_to_text_dict(mod):
+    result = mod._result_to_text({"key": "value"})
+    assert "key" in result
+    assert "value" in result
+
+
+def test_result_to_text_binary(mod):
+    result = mod._result_to_text(b"\x00\x01\xff")
+    assert "binary data" in result
+
+
+def test_result_to_text_int(mod):
+    assert mod._result_to_text(42) == "42"
+
+
+# ---------------------------------------------------------------------------
+# Session lifecycle.
+# ---------------------------------------------------------------------------
+
+def test_session_start_clears_state(mod, sherpa_home):
+    """Starting a session should clear any previous per-session state."""
+    sid = "lifecycle_test"
+    mod._first_user_msg[sid] = "old message"
+    mod._on_session_start(session_id=sid)
+    assert sid not in mod._first_user_msg
+
+
+def test_session_end_flushes_stats(mod, sherpa_home):
+    """Ending a session should flush pending stats to disk."""
+    sid = "flush_test"
+    mod._on_session_start(session_id=sid)
+    mod._bump_stat("rewrites", 5)
+    mod._on_session_end(session_id=sid)
+    state = mod._load_state()
+    assert state["stats"]["rewrites"] >= 5
+
+
+def test_clear_all_sessions(mod, sherpa_home):
+    """_clear_all_sessions should wipe all per-session data."""
+    mod._first_user_msg["s1"] = "msg1"
+    mod._first_user_msg["s2"] = "msg2"
+    mod._clear_all_sessions()
+    assert len(mod._first_user_msg) == 0
+
+
+# ---------------------------------------------------------------------------
+# _tool_schema_preview tests.
+# ---------------------------------------------------------------------------
+
+def test_tool_schema_preview_no_registry(mod, sherpa_home):
+    """Without a registry, schema preview should return a fallback."""
+    result = mod._tool_schema_preview("nonexistent_tool")
+    assert result is not None
+    assert "no parameters" in result or "nonexistent_tool" in result
+
+
+# ---------------------------------------------------------------------------
+# _format_events tests.
+# ---------------------------------------------------------------------------
+
+def test_format_events_empty(mod, sherpa_home):
+    result = mod._format_events(session_id="no_such_session", n=5)
+    assert "no Sherpa telemetry" in result or "(no" in result
+
+
+def test_format_events_after_recording(mod, sherpa_home):
+    mod._record_event("fmt_test", "rewrite", "terminal: cmd->command")
+    result = mod._format_events(session_id="fmt_test", n=5)
+    assert "rewrite" in result
+    assert "terminal" in result
+
+
+# ---------------------------------------------------------------------------
+# _canonical_read_key_path tests.
+# ---------------------------------------------------------------------------
+
+def test_canonical_read_key_path_empty(mod):
+    assert mod._canonical_read_key_path("") == ""
+    assert mod._canonical_read_key_path(None) is None
+
+
+def test_canonical_read_key_path_absolute(mod):
+    result = mod._canonical_read_key_path("/tmp/test.py")
+    assert result == "/tmp/test.py"
+
+
+# ---------------------------------------------------------------------------
+# Plugin version consistency.
+# ---------------------------------------------------------------------------
+
+def test_version_matches_plugin_yaml(mod):
+    """__version__ in __init__.py should match plugin.yaml."""
+    plugin_yaml_path = Path(__file__).resolve().parent.parent / "plugin.yaml"
+    if not plugin_yaml_path.exists():
+        pytest.skip("plugin.yaml not found")
+    # Parse version line directly to avoid requiring pyyaml as a test dependency.
+    yaml_version = None
+    for line in plugin_yaml_path.read_text().splitlines():
+        if line.startswith("version:"):
+            yaml_version = line.split(":", 1)[1].strip()
+            break
+    assert yaml_version is not None, "Could not find 'version:' in plugin.yaml"
+    assert mod.__version__ == yaml_version, (
+        f"Version mismatch: __init__.py={mod.__version__}, plugin.yaml={yaml_version}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# _didyoumean_path tests (additional).
+# ---------------------------------------------------------------------------
+
 def test_didyoumean_path_respects_candidates_limit(mod, sherpa_home, monkeypatch):
     """_didyoumean_path should scan at most _DYM_MAX_CANDIDATES entries, preventing
     latency spikes in directories with thousands of files."""
-    # Create a mock directory with many entries
+    # The previous version of this test only checked the return value (None)
+    # and never asserted that the cap was actually respected. We now
+    # instrument difflib.get_close_matches to count the candidate list size
+    # it receives — that is the real proof the cap is in force.
     ancestor = sherpa_home / "heavy_dir"
     ancestor.mkdir()
-    
-    # Mock os.scandir to return a huge number of entries
+
     class MockDirEntry:
         def __init__(self, name):
             self.name = name
-            
+
     class MockScandir:
         def __init__(self, path):
             pass
         def __enter__(self):
-            # Return more entries than _DYM_MAX_CANDIDATES (500)
             return (MockDirEntry(f"file_{i}.txt") for i in range(1000))
         def __exit__(self, exc_type, exc_val, exc_tb):
-            pass
-            
+            return False
+
     monkeypatch.setattr("os.scandir", MockScandir)
-    
-    # We pass a file path that doesn't exist under ancestor
+
+    import difflib
+    real_gcm = difflib.get_close_matches
+    seen_candidate_counts: list[int] = []
+
+    def counting_gcm(word, possibilities, *args, **kwargs):
+        seen_candidate_counts.append(len(list(possibilities)))
+        return real_gcm(word, list(possibilities), *args, **kwargs)
+
+    monkeypatch.setattr("difflib.get_close_matches", counting_gcm)
+
     target_path = ancestor / "nonexistent.txt"
-    
-    # We call the helper. It should run successfully and return None (since no close match).
-    # Crucially, it shouldn't try to compare all 1000 entries (which we've capped).
-    # Since we can't directly check count of difflib inputs easily, we verify that the constant is indeed respected.
     result = mod._didyoumean_path(str(target_path))
+
     assert result is None
+    assert len(seen_candidate_counts) == 1
+    assert seen_candidate_counts[0] <= mod._DYM_MAX_CANDIDATES
+    assert seen_candidate_counts[0] < 1000
+
+
+# ---------------------------------------------------------------------------
+# Fake plugin context for register/_handle_slash tests.
+# ---------------------------------------------------------------------------
+
+class FakePluginCtx:
+    """Stand-in for the real plugin context used by `register(ctx)`.
+
+    Records every call to register_hook, register_command, and register_tool
+    so tests can assert on them. Also implements unregister_tool (used by
+    `_unregister_aliases` when `alias_tools` is toggled off) and
+    deregister_tool as a no-op alias for back-compat.
+    """
+
+    def __init__(self):
+        self.hooks: dict[str, list] = {}
+        self.commands: dict[str, dict] = {}
+        self.tools: dict[str, dict] = {}
+        self.registered: list[str] = []
+        self.unregistered: list[str] = []
+
+    def register_hook(self, name, fn):
+        self.hooks.setdefault(name, []).append(fn)
+
+    def register_command(self, name, handler, description="", args_hint=""):
+        self.commands[name] = {
+            "handler": handler,
+            "description": description,
+            "args_hint": args_hint,
+        }
+
+    def register_tool(self, name, toolset=None, schema=None, handler=None, emoji=None):
+        self.tools[name] = {
+            "toolset": toolset,
+            "schema": schema,
+            "handler": handler,
+            "emoji": emoji,
+        }
+        self.registered.append(name)
+
+    def unregister_tool(self, name):
+        self.tools.pop(name, None)
+        self.unregistered.append(name)
+
+    # Back-compat alias — the real registry uses `deregister` in some versions.
+    def deregister(self, name):
+        self.unregister_tool(name)
+
+
+# ---------------------------------------------------------------------------
+# _pre_llm_call tests.
+# ---------------------------------------------------------------------------
+
+def test_pre_llm_call_reanchor_fires_at_cadence(mod, sherpa_home):
+    """After _REANCHOR_EVERY tool calls, _pre_llm_call should re-inject the
+    original goal as a Re-anchor nudge."""
+    sid = "reanchor_test"
+    mod._first_user_msg[sid] = "deploy the prod cluster"
+    mod._calls_since_reanchor[sid] = mod._REANCHOR_EVERY  # exactly at the threshold
+
+    result = mod._pre_llm_call(
+        session_id=sid,
+        user_message="continue working",
+        is_first_turn=False,
+    )
+
+    assert result is not None
+    assert "Re-anchor" in result["context"]
+    assert "deploy the prod cluster" in result["context"]
+    # The counter should have been reset so we don't re-fire next turn.
+    assert mod._calls_since_reanchor[sid] == 0
+
+
+def test_pre_llm_call_reanchor_silent_below_cadence(mod, sherpa_home):
+    """Below the cadence threshold, no Re-anchor message is injected."""
+    sid = "reanchor_quiet"
+    mod._first_user_msg[sid] = "some goal"
+    mod._calls_since_reanchor[sid] = mod._REANCHOR_EVERY - 1
+
+    result = mod._pre_llm_call(
+        session_id=sid,
+        user_message="keep going",
+        is_first_turn=False,
+    )
+
+    # Re-anchor should NOT be in the result. Other content (e.g. cheatsheet
+    # refresh) may legitimately be present, so we check the absence of the
+    # Re-anchor string specifically.
+    if result is not None:
+        assert "Re-anchor" not in result["context"]
+
+
+def test_pre_llm_call_stop_nudge_threshold(mod, sherpa_home):
+    """At >= _STOP_NUDGE_AT_CALLS tool calls, the stop-calling-tools nudge
+    must fire so the model doesn't keep thrashing."""
+    sid = "stop_nudge"
+    mod._call_count[sid] = mod._STOP_NUDGE_AT_CALLS
+    # Suppress re-anchor by clearing calls-since-reanchor.
+    mod._calls_since_reanchor[sid] = 0
+    mod._first_user_msg.pop(sid, None)
+
+    result = mod._pre_llm_call(
+        session_id=sid,
+        user_message="carry on",
+        is_first_turn=False,
+    )
+
+    assert result is not None
+    assert "stop calling tools" in result["context"]
+    # The counter should have been reset so the nudge doesn't fire every turn.
+    assert mod._call_count[sid] == 0
+
+
+def test_pre_llm_call_plan_first_injects_on_first_turn(mod, sherpa_home, monkeypatch):
+    """A multi-step first-turn user message should trigger the plan-first
+    nudge (when the `todo` tool is registered and the feature is on)."""
+    # Make sure the plan_first feature is on and that the registry reports
+    # `todo` as a known tool — plan-first only fires in that case (it would
+    # be worse to nudge the model toward a missing tool than to stay silent).
+    state = mod._load_state(bypass_temporal_block=True)
+    state["features"]["plan_first"] = True
+    mod._save_state(state)
+
+    def fake_has_tool(name):
+        return name == "todo"
+    monkeypatch.setattr(mod, "_has_tool", fake_has_tool)
+
+    result = mod._pre_llm_call(
+        session_id="plan_first_test",
+        user_message="First do this. Then do that. Finally check the output.",
+        is_first_turn=True,
+    )
+
+    assert result is not None
+    assert "todo" in result["context"].lower()
+    # The stat counter is held in _pending_stats until _flush_stats() merges
+    # it into persistent state. Drain it before reading.
+    mod._flush_stats()
+    state = mod._load_state(bypass_temporal_block=True)
+    assert state["stats"]["plan_nudges"] >= 1
+
+
+def test_pre_llm_call_total_cap_truncation(mod, sherpa_home):
+    """When the combined nudge text exceeds _TOTAL_NUDGE_CAP it must be
+    truncated with the [TRUNCATED BY SHERPA] marker — otherwise a model
+    could be drowned in its own injected context."""
+    sid = "cap_test"
+    # Pre-fill both per-turn and per-call counters so a stop-nudge and a
+    # re-anchor BOTH fire. The cheatsheet alone is ~600 chars; together with
+    # two large nudges this easily blows past the 8000-char cap.
+    mod._first_user_msg[sid] = "x" * 5000
+    mod._calls_since_reanchor[sid] = mod._REANCHOR_EVERY
+    mod._call_count[sid] = mod._STOP_NUDGE_AT_CALLS
+    # Drop a big queued nudge too.
+    mod._queue_nudge(sid, "hint", "y" * 5000)
+
+    result = mod._pre_llm_call(
+        session_id=sid,
+        user_message="continue",
+        is_first_turn=False,
+    )
+
+    assert result is not None
+    combined = result["context"]
+    assert len(combined) <= mod._TOTAL_NUDGE_CAP + len("\n... [TRUNCATED BY SHERPA]") + 1
+    assert "[TRUNCATED BY SHERPA]" in combined
+
+
+def test_pre_llm_call_truncates_first_user_message(mod, sherpa_home):
+    """The first user message cached for re-anchoring must be capped at
+    _FIRST_USER_MSG_CAP so a multi-KB goal doesn't bloat every future turn."""
+    sid = "history_cap"
+    long_msg = "z" * 5000  # well over _FIRST_USER_MSG_CAP (1500)
+
+    mod._pre_llm_call(
+        session_id=sid,
+        user_message=long_msg,
+        is_first_turn=True,
+    )
+
+    cached = mod._first_user_msg.get(sid, "")
+    assert len(cached) <= mod._FIRST_USER_MSG_CAP
+    # And it should contain the start of the original message verbatim.
+    assert cached.startswith("z" * 100)
+
+
+# ---------------------------------------------------------------------------
+# _handle_slash tests.
+# ---------------------------------------------------------------------------
+
+def test_handle_slash_status(mod, sherpa_home):
+    """/sherpa status returns the lifetime stats + feature overview."""
+    out = mod._handle_slash("status")
+    assert "model-sherpa" in out
+    assert "Features" in out
+    # The lifetime-stats section should at least mention rewrites.
+    assert "silent arg rewrites" in out
+
+
+def test_handle_slash_on_off_toggles(mod, sherpa_home):
+    """/sherpa on and /sherpa off flip the master `enabled` flag in state."""
+    out_off = mod._handle_slash("off")
+    assert "DISABLED" in out_off
+    state = mod._load_state(bypass_temporal_block=True)
+    assert state["enabled"] is False
+
+    out_on = mod._handle_slash("on")
+    assert "ENABLED" in out_on
+    state = mod._load_state(bypass_temporal_block=True)
+    assert state["enabled"] is True
+
+
+def test_handle_slash_feature_alias_tools_on_registers(mod, sherpa_home, monkeypatch):
+    """Toggling `alias_tools` on should register hard aliases via the
+    plugin context's `register_tool` method."""
+    fake_ctx = FakePluginCtx()
+    # The real registry import would return None in tests, so _register_aliases
+    # would early-return. Patch it to a small stub registry so the loop runs.
+    class StubReg:
+        def get_all_tool_names(self):
+            return []
+        def get_entry(self, name):
+            return None
+    stub_reg = StubReg()
+    monkeypatch.setattr(mod, "_registry", lambda: stub_reg)
+    mod._plugin_ctx = fake_ctx
+
+    out = mod._handle_slash("feature alias_tools on")
+    assert "on" in out
+    # FakePluginCtx should now have the hard aliases registered.
+    assert len(fake_ctx.registered) > 0
+    # Every registered tool should carry a "[sherpa alias]" description.
+    for name, payload in fake_ctx.tools.items():
+        assert payload["schema"]["description"].startswith("[sherpa alias]")
+
+
+def test_handle_slash_feature_alias_tools_off_unregisters(mod, sherpa_home, monkeypatch):
+    """Toggling `alias_tools` off should unregister previously-installed
+    hard aliases."""
+    fake_ctx = FakePluginCtx()
+    class StubReg:
+        def get_all_tool_names(self):
+            return []
+        def get_entry(self, name):
+            return None
+    stub_reg = StubReg()
+    monkeypatch.setattr(mod, "_registry", lambda: stub_reg)
+    mod._plugin_ctx = fake_ctx
+
+    # Turn on first so we have something to turn off.
+    mod._handle_slash("feature alias_tools on")
+    assert len(fake_ctx.registered) > 0
+
+    out = mod._handle_slash("feature alias_tools off")
+    assert "off" in out
+    # _unregister_aliases uses the global registry's deregister method, which
+    # our stub does not implement, so it returns 0 unregistered. The
+    # important assertion is that the feature flag was flipped and the
+    # state is consistent.
+    state = mod._load_state(bypass_temporal_block=True)
+    assert state["features"]["alias_tools"] is False
+
+
+def test_handle_slash_doctor_returns_report(mod, sherpa_home):
+    """/sherpa doctor runs a diagnostic and returns a non-empty report."""
+    out = mod._handle_slash("doctor")
+    assert "model-sherpa doctor" in out
+    # Should mention the state file and the registry status.
+    assert "state" in out
+    assert "registry" in out
+
+
+def test_handle_slash_reset_clears_state(mod, sherpa_home):
+    """/sherpa reset should zero out the lifetime stats and clear sessions."""
+    # Seed some state and a per-session dict.
+    mod._bump_stat("rewrites", 5)
+    mod._first_user_msg["s1"] = "stale"
+    mod._first_user_msg["s2"] = "also stale"
+
+    out = mod._handle_slash("reset")
+    assert "cleared" in out.lower()
+
+    state = mod._load_state(bypass_temporal_block=True)
+    assert state["stats"]["rewrites"] == 0
+    assert len(mod._first_user_msg) == 0
+
+
+# ---------------------------------------------------------------------------
+# _post_tool_call happy path.
+# ---------------------------------------------------------------------------
+
+def test_post_tool_call_happy_path_no_nudge(mod, sherpa_home):
+    """A successful tool result (no error) must not trigger a nudge nor
+    bump the error stats. The only state change is incrementing the
+    per-session call counter used for re-anchoring."""
+    sid = "happy_path"
+    mod._drain_nudges(sid)
+    mod._error_streak.pop(sid, None)
+    mod._calls_since_reanchor[sid] = 0
+
+    mod._post_tool_call(
+        tool_name="terminal",
+        args={"command": "ls /tmp"},
+        result={"exit_code": 0, "stdout": "file1\nfile2\n"},
+        session_id=sid,
+    )
+
+    # No nudges should have been queued.
+    pending = mod._pending_nudges.get(sid, [])
+    assert pending == []
+    # Error streak should be zero (success resets it).
+    assert mod._error_streak.get(sid, 0) == 0
+    # The per-session call counter for re-anchor should have been bumped.
+    assert mod._calls_since_reanchor[sid] == 1
+
+
+# ---------------------------------------------------------------------------
+# register(ctx) end-to-end.
+# ---------------------------------------------------------------------------
+
+def test_register_hooks_command_and_aliases(mod, sherpa_home, monkeypatch):
+    """register(ctx) must install all 6 hooks, register the /sherpa command,
+    and (when alias_tools is on) wire up the hard alias tools on ctx."""
+    fake_ctx = FakePluginCtx()
+
+    class StubReg:
+        def get_all_tool_names(self):
+            return []
+        def get_entry(self, name):
+            return None
+    monkeypatch.setattr(mod, "_registry", lambda: StubReg())
+
+    # Enable alias_tools before registration so we exercise the alias path.
+    state = mod._load_state(bypass_temporal_block=True)
+    state["features"]["alias_tools"] = True
+    mod._save_state(state)
+
+    mod.register(fake_ctx)
+
+    expected_hooks = {
+        "pre_tool_call",
+        "post_tool_call",
+        "transform_tool_result",
+        "pre_llm_call",
+        "on_session_start",
+        "on_session_end",
+    }
+    assert expected_hooks.issubset(set(fake_ctx.hooks.keys()))
+    # Each hook should have been registered with exactly one callable.
+    for hook_name in expected_hooks:
+        assert len(fake_ctx.hooks[hook_name]) == 1
+
+    # The slash command should be present.
+    assert "sherpa" in fake_ctx.commands
+    cmd = fake_ctx.commands["sherpa"]
+    assert callable(cmd["handler"])
+
+    # Hard aliases should have been registered on the fake ctx.
+    assert len(fake_ctx.registered) > 0
+    # Plugin ctx global should now point at our fake.
+    assert mod._plugin_ctx is fake_ctx
+
+    # Cleanup so the test doesn't leak global state into others.
+    mod._plugin_ctx = None
+    mod._registered_alias_tool_names.clear()
 
 

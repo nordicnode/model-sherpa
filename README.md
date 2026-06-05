@@ -89,11 +89,11 @@ Sherpa is built for privacy-conscious environments:
 
 | Command | Description |
 | :--- | :--- |
-| `/sherpa status` | Comprehensive dashboard of lifetime stats and feature states. |
-| `/sherpa feature <name> <on/off>` | Real-time toggle for any guide-rail (e.g., `loop_detector`, `read_damper`). |
+| `/sherpa` (no subcommand) | Comprehensive dashboard of lifetime stats and feature states. |
+| `/sherpa feature <name> <on|off>` | Real-time toggle for any guide-rail (e.g., `didyoumean`, `read_damper`). |
 | `/sherpa doctor` | Runs a diagnostic check on your tool registry to find schema inconsistencies. |
 | `/sherpa telemetry` | View the most recent session events with full redaction. |
-| `/sherpa add hint <regex> <message>` | Dynamically add new recovery hints without restarting. |
+| `/sherpa add <pattern> <hint>` | Dynamically add new recovery hints without restarting. |
 
 ---
 

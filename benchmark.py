@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Model Sherpa Benchmark Generator
-Computes token savings, error reduction, and latency savings based on actual
-historical metrics from state.json.
+Computes token savings, error reduction, and latency savings based on
+estimated metrics derived from correction counts in state.json and
+configurable per-incident multipliers.
 """
 
 import json
@@ -70,8 +71,7 @@ def run_benchmark():
     # - Additionally, preventing failures (api_calls_saved) saves prompt and completion tokens for the retry turns
     tokens_saved_input = (stats.get("read_blocks", 0) * AVG_FILE_READ_TOKENS) + (api_calls_saved * AVG_PROMPT_TOKENS)
     tokens_saved_output = api_calls_saved * AVG_COMPLETION_TOKENS
-    total_tokens_saved = tokens_saved_input + tokens_saved_output
-    
+
     # Cumulative Context Carry-Over
     # Redundant context tokens are sent in every subsequent turn of a session.
     # Assuming an average of 5 subsequent turns per saved read/call:
@@ -110,7 +110,7 @@ Based on **{stats.get('cheatsheets', 0) + 10}** monitored agent runs, Model Sher
 | Metric | Without Model Sherpa | With Model Sherpa | Efficiency Gain / Savings |
 | :--- | :---: | :---: | :---: |
 | **Failed Tool Executions** | {api_calls_saved} | 0 | **100% Error Prevention** |
-| **Average Turns to Goal** | {(stats.get('cheatsheets', 0) + 10) * 1.4:.1f} | {stats.get('cheatsheets', 0) + 10} | **~30% Fewer Roundtrips** |
+| **Average Turns to Goal** | {(stats.get('cheatsheets', 0) + 10) * 1.4:.1f} | {stats.get('cheatsheets', 0) + 10} | **~{((0.4/1.4)*100):.0f}% Fewer Roundtrips** |
 | **Redundant File Reads** | {stats.get('read_blocks', 0)} | 0 | **100% Redundancy Damped** |
 | **Context Window Overhead** | {cumulative_tokens_saved:,} tokens | 0 tokens | **{cumulative_tokens_saved:,} tokens saved** |
 | **API Latency Overhead** | {total_time_saved_sec:.1f}s | 0.0s | **{total_time_saved_sec:.1f}s saved** |

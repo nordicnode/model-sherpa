@@ -125,6 +125,21 @@ LOCK_FILE = STATE_DIR / "state.lock"   # fcntl flock target (Bug #1 fix)
 LOG_FILE = STATE_DIR / "corrections.log"
 EVENT_LOG_FILE = STATE_DIR / "events.jsonl"
 
+# ---------------------------------------------------------------------------
+# Tuning constants
+# ---------------------------------------------------------------------------
+# Above this length we stop scanning the full result text in the linear
+# error/hint detectors (_match_error_hint, _looks_like_error) and instead
+# sample both ends of the buffer. 8 KiB is comfortably larger than any
+# realistic error message but small enough to keep regex passes O(1).
+MAX_ERROR_OUTPUT_LENGTH = 8192
+# Size of each end-sample (in characters) and the truncation length used
+# when bounding user messages for the multi-step detector
+# (_is_multistep_request). 4 KiB is enough to cover most real prompts and
+# keeps the detector from being a quadratic hazard on accidentally-pasted
+# multi-MB blobs.
+MAX_TOOL_RESULT_LENGTH = 4000
+
 __version__ = "0.3.1"   # keep in sync with plugin.yaml
 
 _state_lock = threading.RLock()
@@ -135,7 +150,8 @@ _event_log_lock = threading.RLock()
 _event_rotate_lock = threading.RLock()   # separate lock so event-rotation doesn't contend with correction-log writes
 
 _last_stat_time = 0.0
-_last_rotation_check = 0.0   # Bug #3 fix: was referenced but never assigned
+_last_correction_rotation = 0.0   # Bug #3 fix: was referenced but never assigned
+_last_event_rotation = 0.0  # Separate timestamp for event-log rotation to avoid coupling
 
 # In-memory cache for _load_state. Hooks (pre_tool_call, post_tool_call,
 # pre_llm_call) call _feature() many times per turn, which used to re-read,
@@ -143,7 +159,7 @@ _last_rotation_check = 0.0   # Bug #3 fix: was referenced but never assigned
 # merged dict and invalidate when (a) _save_state writes new state, or
 # (b) the on-disk file mtime/size changes (handles external edits/resets).
 _state_cache: Optional[Dict[str, Any]] = None
-_state_cache_sig: Optional[Tuple[float, int]] = None  # (mtime, size)
+_state_cache_sig: Optional[Tuple[float, int, int]] = None  # (mtime, size, inode)
 
 _DEFAULT_STATE: Dict[str, Any] = {
     "enabled": True,
@@ -201,38 +217,18 @@ def _deep_merge(defaults: Any, override: Any) -> Any:
 
 
 @contextlib.contextmanager
-def _lock_state_file(mode: int):
-    """Acquire a cross-process lock on state.lock (LOCK_SH or LOCK_EX).
+def _lock_file(lock_path: Path = LOCK_FILE, mode: int = 0):
+    """Acquire a cross-process lock on a specific file path.
+
+    Defaults to LOCK_FILE (the state-file lock) so existing call-sites that
+    only need to serialize state.json access can call ``_lock_file(mode=...)``
+    without specifying a path. Pass an explicit ``lock_path`` for other files
+    (e.g. log rotation targets).
 
     Uses LOCK_NB with a retry loop so a contested lock does not block the CLI
     indefinitely, but still prevents race conditions by attempting to acquire
     the lock multiple times before failing open.
     """
-    if fcntl is None:
-        yield
-        return
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        with LOCK_FILE.open("a+") as f:
-            acquired = False
-            for _ in range(10):
-                try:
-                    fcntl.flock(f, mode | fcntl.LOCK_NB)
-                    acquired = True
-                    break
-                except OSError:
-                    time.sleep(0.01)
-            if not acquired:
-                logger.debug("model-sherpa: lock acquisition on %s failed after retries, proceeding without lock", LOCK_FILE)
-            yield
-    except Exception as exc:
-        logger.debug("model-sherpa: cross-process lock unavailable: %s", exc)
-        yield
-
-
-@contextlib.contextmanager
-def _lock_file(lock_path: Path, mode: int):
-    """Acquire a cross-process lock on a specific file path."""
     if fcntl is None:
         yield
         return
@@ -252,6 +248,18 @@ def _lock_file(lock_path: Path, mode: int):
             yield
     except Exception as exc:
         logger.debug("model-sherpa: cross-process lock on %s unavailable: %s", lock_path, exc)
+        yield
+
+
+@contextlib.contextmanager
+def _lock_state_file(mode: int):
+    """Acquire a cross-process lock on state.lock (LOCK_SH or LOCK_EX).
+
+    Thin shim over :func:`_lock_file` that defaults to ``LOCK_FILE``.
+    Retained for backward compatibility with call-sites that pre-date the
+    consolidation.
+    """
+    with _lock_file(LOCK_FILE, mode):
         yield
 
 
@@ -345,6 +353,9 @@ def _save_state(state: Dict[str, Any]) -> None:
                         pass
                 tmp.replace(STATE_FILE)
         finally:
+            # Cleanup: on the success path tmp.replace() already moved the file,
+            # so tmp.exists() is False. This only fires on failure (e.g. disk full,
+            # crash between write and replace) to remove the orphaned temp file.
             if tmp.exists():
                 try:
                     tmp.unlink()
@@ -390,14 +401,14 @@ def _rotate_file(path: Path, max_size: int = 10 * 1024 * 1024, backup_count: int
                     if s.exists():
                         try:
                             s.replace(d)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("model-sherpa: log rotation rename failed: %s", exc)
                 try:
                     path.replace(path.with_suffix(f".1{path.suffix}"))
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as exc:
+                    logger.debug("model-sherpa: log rotation final replace failed: %s", exc)
+    except Exception as exc:
+        logger.debug("model-sherpa: log rotation for %s failed: %s", path, exc)
 
 
 def _migrate_state() -> None:
@@ -416,7 +427,7 @@ def _migrate_state() -> None:
 
 def _log_correction(kind: str, detail: str) -> None:
     """Append a timestamped entry to the corrections log."""
-    global _last_log_entry, _last_rotation_check
+    global _last_log_entry, _last_correction_rotation
     now = time.time()
     with _log_lock:
         if _last_log_entry is not None:
@@ -425,14 +436,14 @@ def _log_correction(kind: str, detail: str) -> None:
                 return
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            if (now - _last_rotation_check) > 10.0:
+            if (now - _last_correction_rotation) > 10.0:
                 _rotate_file(LOG_FILE)
-                _last_rotation_check = now
+                _last_correction_rotation = now
             with LOG_FILE.open("a") as f:
                 f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{kind}] {detail}\n")
             _last_log_entry = (kind, detail, now)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("model-sherpa: failed to write correction log: %s", exc)
 
 
 def _flush_stats_safely() -> None:
@@ -900,7 +911,8 @@ def _result_to_text(result: Any) -> str:
     return str(result)
 
 
-# session_id -> list of compiled custom hints
+# session_id -> list of compiled custom hints (protected by _hint_cache_lock)
+_hint_cache_lock = threading.Lock()
 _custom_hint_cache: List[Tuple[re.Pattern, str]] = []
 _last_hint_cache_sig: Optional[str] = None
 
@@ -909,8 +921,8 @@ def _match_error_hint(result_text: str) -> Optional[str]:
     if not result_text:
         return None
     # Sample both ends of large outputs
-    if len(result_text) > 8192:
-        search_text = result_text[:4000] + "\n...\n" + result_text[-4000:]
+    if len(result_text) > MAX_ERROR_OUTPUT_LENGTH:
+        search_text = result_text[:MAX_TOOL_RESULT_LENGTH] + "\n...\n" + result_text[-MAX_TOOL_RESULT_LENGTH:]
     else:
         search_text = result_text
 
@@ -926,21 +938,26 @@ def _match_error_hint(result_text: str) -> Optional[str]:
         
     # Re-compile hints only if the list in state has changed
     try:
-        current_sig = hashlib.md5(json.dumps(hints, sort_keys=True).encode()).hexdigest()
+        current_sig = hashlib.md5(json.dumps(hints, sort_keys=True).encode(), usedforsecurity=False).hexdigest()
     except Exception:
         current_sig = None
         
     if current_sig != _last_hint_cache_sig:
-        new_cache = []
-        for entry in hints:
-            if isinstance(entry, dict) and "pattern" in entry and "hint" in entry:
-                try:
-                    new_cache.append((re.compile(entry["pattern"], re.I), entry["hint"]))
-                except Exception:
-                    continue
-        _custom_hint_cache = new_cache
-        _last_hint_cache_sig = current_sig
-        
+        with _hint_cache_lock:
+            # Double-check after acquiring lock (another thread may have updated)
+            if current_sig != _last_hint_cache_sig:
+                new_cache = []
+                for entry in hints:
+                    if isinstance(entry, dict) and "pattern" in entry and "hint" in entry:
+                        try:
+                            new_cache.append((re.compile(entry["pattern"], re.I), entry["hint"]))
+                        except Exception:
+                            continue
+                _custom_hint_cache = new_cache
+                _last_hint_cache_sig = current_sig
+
+    # Python's GIL protects atomic list reads on the fast path (cache hit);
+    # the lock above already synchronizes the slow path (cache miss/rebuild).
     for pat, hint in _custom_hint_cache:
         if pat.search(search_text):
             return hint
@@ -998,8 +1015,8 @@ def _looks_like_error(result: Any, tool_name: str = "") -> bool:
             return False
 
     # Sample both ends for pattern matching
-    if len(result_text) > 8192:
-        chunk = result_text[:4000] + "\n...\n" + result_text[-4000:]
+    if len(result_text) > MAX_ERROR_OUTPUT_LENGTH:
+        chunk = result_text[:MAX_TOOL_RESULT_LENGTH] + "\n...\n" + result_text[-MAX_TOOL_RESULT_LENGTH:]
     else:
         chunk = result_text
     chunk_l = chunk.lower()
@@ -1050,12 +1067,10 @@ _LOOP_REPEATS = 3
 _STOP_NUDGE_AT_CALLS = 15
 _HISTORY_CAP = 16
 _REANCHOR_EVERY = 10
-_READ_DAMPER_LIMIT = 3   # 4th read of same path in same turn is blocked
 _CHEATSHEET_EVERY_TURNS = 25  # re-inject cheatsheet every N user turns
 _EVENT_CAP = 200
-_TOTAL_NUDGE_CAP = 4000     # cap total injected text to 4k
+_TOTAL_NUDGE_CAP = 8000     # cap total injected text (wired up in _pre_llm_call)
 _FIRST_USER_MSG_CAP = 1500    # cap re-anchor goal to 1.5k to avoid payload bloat
-_DYM_MAX_DIR_ENTRIES = 5000   # sample at most this many dir entries for DYM
 _DYM_MAX_CANDIDATES = 500     # cap difflib candidate list for better latency
 
 # Per-nudge-kind throttle (Bug #2 fix: were referenced but never defined).
@@ -1240,11 +1255,11 @@ def _record_event(session_id: str, kind: str, detail: str, **fields: Any) -> Non
         # correction-log lock, so writes to events.jsonl don't block on
         # corrections.log rotations (and vice versa).
         with _event_rotate_lock:
-            global _last_rotation_check
+            global _last_event_rotation
             now = time.time()
-            if (now - _last_rotation_check) > 10.0:
+            if (now - _last_event_rotation) > 10.0:
                 _rotate_file(EVENT_LOG_FILE, lock=_event_rotate_lock)
-                _last_rotation_check = now
+                _last_event_rotation = now
         with _event_log_lock:
             with EVENT_LOG_FILE.open("a") as f:
                 f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
@@ -1365,8 +1380,8 @@ _BULLET_RE = re.compile(
 def _is_multistep_request(msg: str) -> bool:
     if not msg:
         return False
-    if len(msg) > 4000:
-        msg = msg[:4000]
+    if len(msg) > MAX_TOOL_RESULT_LENGTH:
+        msg = msg[:MAX_TOOL_RESULT_LENGTH]
     sentences = re.split(r"[.!?\n]+", msg.strip())
     sentences = [s for s in sentences if len(s.split()) >= 3]
     if len(sentences) >= 3:
@@ -1964,7 +1979,36 @@ def _pre_tool_call(
     "abort the call; show ``message`` to the model". This contract is part
     of Hermes' pre-tool-call interface and should not change without
     coordinating with the framework.
+
+    Fail-open: any unhandled exception is logged and the original ``args``
+    are returned unchanged (None) so a buggy Sherpa never crashes the host
+    agent. See CONTRIBUTING.md ("Code Style & Design Rules > Safety First").
     """
+    try:
+        return _pre_tool_call_impl(
+            tool_name=tool_name,
+            args=args,
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            "model-sherpa: _pre_tool_call failed for tool=%s (%s); "
+            "failing open with original args", tool_name, exc,
+        )
+        return None
+
+
+def _pre_tool_call_impl(
+    tool_name: str = "",
+    args: Optional[Dict[str, Any]] = None,
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    **_: Any,
+) -> Optional[Dict[str, str]]:
+    """Implementation of _pre_tool_call. See _pre_tool_call for the contract."""
     state = _load_state()
     if not state.get("enabled") or not isinstance(args, dict):
         return None
@@ -2039,7 +2083,7 @@ def _pre_tool_call(
                 return None
             return {"action": "block", "message": msg}
 
-    # 3) Smart read-range damper
+    # 4) Smart read-range damper
     if _feature("read_damper") and tool_name == "read_file":
         path = (effective_args.get("path") or "").strip()
         if path:
@@ -2300,8 +2344,8 @@ def _pre_llm_call(
     
     combined = "\n\n".join(parts)
     # Hard cap on total injected text to avoid drowning out actual tool outputs
-    if len(combined) > 8000:
-        combined = combined[:8000] + "\n... [TRUNCATED BY SHERPA]"
+    if len(combined) > _TOTAL_NUDGE_CAP:
+        combined = combined[:_TOTAL_NUDGE_CAP] + "\n... [TRUNCATED BY SHERPA]"
         
     return {"context": combined}
 
@@ -2455,7 +2499,14 @@ def _alias_handler(real_tool: str,
             reg = _registry()
             if reg is None:
                 return json.dumps({"error": f"alias dispatch unavailable: {exc}"})
-            return reg.dispatch(
+            dispatch = getattr(reg, "dispatch", None)
+            if dispatch is None:
+                logger.warning(
+                    "model-sherpa: registry has no 'dispatch' attribute "
+                    "(%s); cannot fall back for alias %s", reg, real_tool,
+                )
+                return json.dumps({"error": "alias dispatch unavailable: registry has no dispatch method"})
+            return dispatch(
                 real_tool, real_args,
                 task_id=kw.get("task_id"),
                 user_task=kw.get("user_task"),
