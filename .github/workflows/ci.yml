@@ -44,12 +44,10 @@ jobs:
     - name: Run mypy
       # mypy can't infer package from __init__.py when the dir has a hyphen.
       # Copy to a temp dir with a valid name and check there.
-      # Currently non-blocking (|| true) — 11 pre-existing type annotation
-      # mismatches to fix incrementally. Remove `|| true` once all are resolved.
       run: |
         mkdir -p /tmp/mypy-check/model_sherpa
         cp __init__.py /tmp/mypy-check/model_sherpa/
-        mypy --ignore-missing-imports /tmp/mypy-check/model_sherpa/__init__.py || true
+        mypy --ignore-missing-imports /tmp/mypy-check/model_sherpa/__init__.py
 
   test:
     name: Tests

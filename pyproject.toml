@@ -71,6 +71,7 @@ ignore = [
     "UP006",  # deprecated typing.Dict/List/Tuple — too many to fix now
     "UP035",  # deprecated typing imports — same
     "UP045",  # Optional[X] → X | None — too many to fix now
+    "UP007",  # X | Y for type annotations — needs 3.10+ runtime
 ]
 
 [tool.ruff.lint.per-file-ignores]

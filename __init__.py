@@ -98,7 +98,7 @@ import difflib
 try:
     import fcntl
 except ImportError:
-    fcntl = None
+    fcntl = None  # type: ignore[assignment]
 import functools
 import hashlib
 import json
@@ -111,7 +111,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger("model-sherpa")
 
@@ -376,7 +376,10 @@ def _save_state(state: Dict[str, Any]) -> None:
 
 
 def _rotate_file(
-    path: Path, max_size: int = 10 * 1024 * 1024, backup_count: int = 5, lock: Optional[threading.Lock] = None
+    path: Path,
+    max_size: int = 10 * 1024 * 1024,
+    backup_count: int = 5,
+    lock: Optional[Union[threading.Lock, threading.RLock]] = None,
 ) -> None:
     """Atomic size-based log rotation (e.g. log.jsonl -> log.1.jsonl).
 
@@ -1075,7 +1078,7 @@ def _canonical_read_key_path(path: str) -> str:
 # session_id -> deque of (tool_name, args_hash)
 _call_history: Dict[str, Deque[Tuple[str, str]]] = {}
 # session_id -> (tool, hash) of last loop we nudged about
-_last_notified_loop: Dict[str, Tuple[str, str]] = {}
+_last_notified_loop: Dict[str, Any] = {}
 # session_id -> list of pending nudges to inject next pre_llm_call.
 # Each entry is (kind, text). Kinds dedup within a single turn so e.g.
 # repeating loop trips can't stack four near-identical "you called X with
@@ -1246,10 +1249,10 @@ def _record_call(session_id: str, tool_name: str, args: Dict[str, Any]) -> bool:
             # 3. Triple sequence (A-B-C-A-B-C)
             if len(hist) >= 6:
                 if items[-1] == items[-4] and items[-2] == items[-5] and items[-3] == items[-6]:
-                    pattern = (items[-3], items[-2], items[-1])
-                    if _last_notified_loop.get(sid) == pattern:
+                    triple = (items[-3], items[-2], items[-1])
+                    if _last_notified_loop.get(sid) == triple:
                         return False
-                    _last_notified_loop[sid] = pattern
+                    _last_notified_loop[sid] = triple
                     return True
 
         _last_notified_loop.pop(sid, None)
@@ -1479,7 +1482,7 @@ def _didyoumean_tool(name: str) -> Optional[str]:
     if _feature("aliases"):
         alias_target = _SOFT_ALIAS_TARGETS.get(name)
         if alias_target:
-            return alias_target
+            return str(alias_target)
     candidates = _registered_tool_names()
     if len(candidates) < 2:
         return None
@@ -1578,11 +1581,13 @@ def _get_schema_cached(name: str, generation: int) -> Optional[Dict[str, Any]]:
     getter = getattr(reg, "get_schema", None)
     if callable(getter):
         try:
-            return getter(name)
+            schema = getter(name)
+            return schema if isinstance(schema, dict) else None
         except Exception:
             return None
     entry = _registry_tools().get(name)
-    return getattr(entry, "schema", None) if entry else None
+    raw = getattr(entry, "schema", None) if entry else None
+    return raw if isinstance(raw, dict) else None
 
 
 def _get_schema(name: str) -> Optional[Dict[str, Any]]:
@@ -1621,8 +1626,8 @@ def _render_schema_prop(name: str, prop: Any, required: bool, depth: int = 0) ->
     ptype = prop.get("type", "any")
     if "enum" in prop and isinstance(prop["enum"], list):
         # Format enum values compactly
-        choices = " | ".join(json.dumps(v) for v in prop["enum"])
-        return f"{name}{star}: {choices}"
+        enum_str = " | ".join(json.dumps(v) for v in prop["enum"])
+        return f"{name}{star}: {enum_str}"
 
     if ptype == "object" and "properties" in prop:
         inner_props = prop["properties"]
@@ -3087,13 +3092,13 @@ def _handle_slash(raw: str) -> str:
         for tool, aliases in _ARG_ALIASES.items():
             lines.append(f"  {tool}: " + ", ".join(f"{w}→{r}" for w, r in aliases.items()))
         lines.append("\n**Built-in error-hint patterns:**")
-        for pat, hint in _ERROR_HINTS:
-            lines.append(f"  /{pat.pattern}/ → {hint[:80]}…")
+        for err_pat, err_hint in _ERROR_HINTS:
+            lines.append(f"  /{err_pat.pattern}/ → {err_hint[:80]}…")
         state = _load_state()
         if state.get("custom_hints"):
             lines.append("\n**Custom hints:**")
-            for e in state["custom_hints"]:
-                lines.append(f"  /{e['pattern']}/ → {e['hint']}")
+            for entry in state["custom_hints"]:
+                lines.append(f"  /{entry['pattern']}/ → {entry['hint']}")
         return "\n".join(lines)
 
     if sub == "reset":
