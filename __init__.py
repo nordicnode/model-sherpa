@@ -94,6 +94,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import difflib
+
 try:
     import fcntl
 except ImportError:
@@ -121,7 +122,7 @@ logger = logging.getLogger("model-sherpa")
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
 STATE_DIR = HERMES_HOME / "memories" / "model-sherpa"
 STATE_FILE = STATE_DIR / "state.json"
-LOCK_FILE = STATE_DIR / "state.lock"   # fcntl flock target (Bug #1 fix)
+LOCK_FILE = STATE_DIR / "state.lock"  # fcntl flock target (Bug #1 fix)
 LOG_FILE = STATE_DIR / "corrections.log"
 EVENT_LOG_FILE = STATE_DIR / "events.jsonl"
 
@@ -140,17 +141,17 @@ MAX_ERROR_OUTPUT_LENGTH = 8192
 # multi-MB blobs.
 MAX_TOOL_RESULT_LENGTH = 4000
 
-__version__ = "0.3.1"   # keep in sync with plugin.yaml
+__version__ = "0.3.1"  # keep in sync with plugin.yaml
 
 _state_lock = threading.RLock()
 # RLocks so log-rotation (which re-acquires the same lock inside _rotate_file)
 # does not deadlock with the caller that already holds it.
 _log_lock = threading.RLock()
 _event_log_lock = threading.RLock()
-_event_rotate_lock = threading.RLock()   # separate lock so event-rotation doesn't contend with correction-log writes
+_event_rotate_lock = threading.RLock()  # separate lock so event-rotation doesn't contend with correction-log writes
 
 _last_stat_time = 0.0
-_last_correction_rotation = 0.0   # Bug #3 fix: was referenced but never assigned
+_last_correction_rotation = 0.0  # Bug #3 fix: was referenced but never assigned
 _last_event_rotation = 0.0  # Separate timestamp for event-log rotation to avoid coupling
 
 # In-memory cache for _load_state. Hooks (pre_tool_call, post_tool_call,
@@ -163,19 +164,19 @@ _state_cache_sig: Optional[Tuple[float, int, int]] = None  # (mtime, size, inode
 
 _DEFAULT_STATE: Dict[str, Any] = {
     "enabled": True,
-    "custom_hints": [],          # [{"pattern": "...", "hint": "..."}, ...]
+    "custom_hints": [],  # [{"pattern": "...", "hint": "..."}, ...]
     # Feature toggles for the v0.2 additions. All ship ON.
     "features": {
-        "aliases":          True,  # soft bash/cat/grep/find/etc. recovery hints
-        "alias_tools":      False, # hard-register alias tools (visible; opt-in)
-        "dry_run":          False, # report repairs/blocks without applying them
-        "didyoumean":       True,  # ENOENT → closest filename suggestion
-        "reanchor":         True,  # reinject original goal on loop / every 10
-        "plan_first":       True,  # multi-step prompts → nudge to use `todo`
-        "arg_guard":        True,  # block empty/bogus required args
+        "aliases": True,  # soft bash/cat/grep/find/etc. recovery hints
+        "alias_tools": False,  # hard-register alias tools (visible; opt-in)
+        "dry_run": False,  # report repairs/blocks without applying them
+        "didyoumean": True,  # ENOENT → closest filename suggestion
+        "reanchor": True,  # reinject original goal on loop / every 10
+        "plan_first": True,  # multi-step prompts → nudge to use `todo`
+        "arg_guard": True,  # block empty/bogus required args
         "schema_on_demand": True,  # tool-arg validation failure → show schema
-        "read_damper":      True,  # block 4th read of same path in one turn
-        "command_lint":     True,  # repair common terminal command mistakes
+        "read_damper": True,  # block 4th read of same path in one turn
+        "command_lint": True,  # repair common terminal command mistakes
     },
     "stats": {
         "rewrites": 0,
@@ -244,7 +245,9 @@ def _lock_file(lock_path: Path = LOCK_FILE, mode: int = 0):
                 except OSError:
                     time.sleep(0.01)
             if not acquired:
-                logger.debug("model-sherpa: lock acquisition on %s failed after retries, proceeding without lock", lock_path)
+                logger.debug(
+                    "model-sherpa: lock acquisition on %s failed after retries, proceeding without lock", lock_path
+                )
             yield
     except Exception as exc:
         logger.debug("model-sherpa: cross-process lock on %s unavailable: %s", lock_path, exc)
@@ -303,7 +306,7 @@ def _load_state(bypass_temporal_block: bool = False) -> Dict[str, Any]:
                 _state_cache = merged
                 _state_cache_sig = sig
                 return copy.deepcopy(merged)
-        
+
         if isinstance(data, dict):
             # Removed: model/tier-specific behavior. Safeguards apply uniformly
             # to every model, so old persisted profile keys are ignored.
@@ -318,14 +321,13 @@ def _load_state(bypass_temporal_block: bool = False) -> Dict[str, Any]:
 
 def _update_state(func: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
     """Atomically load, modify, and save state with both thread and process locking."""
-    with _state_lock:
-        with _lock_state_file(fcntl.LOCK_EX if fcntl else 0):
-            # We bypass the temporal block to ensure we see the absolute latest
-            # on-disk state before applying the mutation.
-            state = _load_state(bypass_temporal_block=True)
-            func(state)
-            _save_state(state)
-            return state
+    with _state_lock, _lock_state_file(fcntl.LOCK_EX if fcntl else 0):
+        # We bypass the temporal block to ensure we see the absolute latest
+        # on-disk state before applying the mutation.
+        state = _load_state(bypass_temporal_block=True)
+        func(state)
+        _save_state(state)
+        return state
 
 
 def _feature(name: str) -> bool:
@@ -373,8 +375,9 @@ def _save_state(state: Dict[str, Any]) -> None:
             _state_cache_sig = None
 
 
-def _rotate_file(path: Path, max_size: int = 10 * 1024 * 1024, backup_count: int = 5,
-                 lock: Optional[threading.Lock] = None) -> None:
+def _rotate_file(
+    path: Path, max_size: int = 10 * 1024 * 1024, backup_count: int = 5, lock: Optional[threading.Lock] = None
+) -> None:
     """Atomic size-based log rotation (e.g. log.jsonl -> log.1.jsonl).
 
     Issue #8 fix: callers can pass a per-file lock so the event log's rotation
@@ -397,7 +400,7 @@ def _rotate_file(path: Path, max_size: int = 10 * 1024 * 1024, backup_count: int
                     return
                 for i in range(backup_count - 1, 0, -1):
                     s = path.with_suffix(f".{i}{path.suffix}")
-                    d = path.with_suffix(f".{i+1}{path.suffix}")
+                    d = path.with_suffix(f".{i + 1}{path.suffix}")
                     if s.exists():
                         try:
                             s.replace(d)
@@ -464,6 +467,7 @@ def _ensure_periodic_flush() -> None:
     with _timer_lock:
         if _periodic_flush_timer is not None:
             return  # already running
+
         def _tick():
             _flush_stats_safely()
             global _periodic_flush_timer
@@ -475,9 +479,8 @@ def _ensure_periodic_flush() -> None:
                     _ensure_periodic_flush()
                 else:
                     _periodic_flush_timer = None
-        _periodic_flush_timer = threading.Timer(
-            _PERIODIC_FLUSH_INTERVAL, _tick
-        )
+
+        _periodic_flush_timer = threading.Timer(_PERIODIC_FLUSH_INTERVAL, _tick)
         _periodic_flush_timer.daemon = True
         _periodic_flush_timer.start()
 
@@ -541,26 +544,23 @@ def _flush_stats() -> None:
         pending = dict(_pending_stats)
         _pending_stats.clear()
     try:
+
         def update(s):
             for k, v in pending.items():
                 if _PER_TOOL_SEP in k:
                     stat_key, tool = k.split(_PER_TOOL_SEP, 1)
                     s["stats"].setdefault("per_tool", {})
                     s["stats"]["per_tool"].setdefault(tool, {})
-                    s["stats"]["per_tool"][tool][stat_key] = (
-                        s["stats"]["per_tool"][tool].get(stat_key, 0) + v
-                    )
+                    s["stats"]["per_tool"][tool][stat_key] = s["stats"]["per_tool"][tool].get(stat_key, 0) + v
                 else:
                     s["stats"][k] = s["stats"].get(k, 0) + v
+
         _update_state(update)
     except Exception:
         with _stats_lock:
             for k, v in pending.items():
                 _pending_stats[k] = _pending_stats.get(k, 0) + v
         raise
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +741,7 @@ def _repair_smart_quotes(value: Any) -> Tuple[Any, bool]:
     The recursion is bounded by _FINGERPRINT_MAX_DEPTH so cyclic / runaway
     structures cannot wedge the repair pass.
     """
+
     def _walk(v: Any, depth: int, seen: set) -> Tuple[Any, bool]:
         if depth >= _FINGERPRINT_MAX_DEPTH:
             return v, False
@@ -770,6 +771,7 @@ def _repair_smart_quotes(value: Any) -> Tuple[Any, bool]:
                     changed = True
             return v, changed
         return v, False
+
     return _walk(value, 0, set())
 
 
@@ -809,7 +811,7 @@ def _repair_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
         # Create maps for case-insensitive and normalized lookups
         schema_props_l = {p.lower(): p for p in schema_props}
         schema_props_n = {_normalize_key(p): p for p in schema_props}
-        
+
         for key in list(args.keys()):
             key_l = key.lower()
             key_n = _normalize_key(key)
@@ -825,7 +827,7 @@ def _repair_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
                         args[actual_canonical] = args.pop(key)
                         fixes.append(f"{key}→{actual_canonical}")
                 continue
-            
+
             # 2. Fuzzy match (normalized)
             if key_n in schema_props_n:
                 actual_canonical = schema_props_n[key_n]
@@ -836,7 +838,7 @@ def _repair_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
                     args[actual_canonical] = args.pop(key)
                     fixes.append(f"{key}→{actual_canonical}")
                 continue
-                
+
             group_l = _synonym_group_for(key)
             if not group_l:
                 continue
@@ -844,10 +846,10 @@ def _repair_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
             target_candidates_l = sorted([p for p in group_l if p in schema_props_l])
             if not target_candidates_l:
                 continue
-                
+
             target_l = target_candidates_l[0]
             target = schema_props_l[target_l]
-            
+
             if target in args:
                 args.pop(key, None)
                 fixes.append(f"dropped duplicate synonym {key}")
@@ -863,33 +865,48 @@ def _repair_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 _ERROR_HINTS: List[Tuple[re.Pattern, str]] = [
-    (re.compile(r"no such file|enoent|file not found", re.I),
-     "Tip: the path didn't exist. Use `search_files` to locate it first, "
-     "or run `terminal(command='ls <dir>')` to inspect what's actually there."),
-    (re.compile(r"permission denied|eacces", re.I),
-     "Tip: avoid system dirs. Write under `$HERMES_HOME` (e.g. "
-     "`~/.hermes/tmp/`) or use `terminal(command='sudo …')` if you must."),
-    (re.compile(r"patch: .*failed to apply", re.I),
-     "Tip: `patch` is very sensitive to whitespace and line numbers. "
-     "If you are having trouble, try using `write_file` to overwrite the "
-     "entire file instead, especially if the file is small."),
-    (re.compile(r"command not found|: not found", re.I),
-     "Tip: that binary isn't on PATH. Try the Python equivalent inside "
-     "`execute_code(language='python', …)` or install with the project's "
-     "package manager first."),
-    (re.compile(r"no such tool|unknown tool|tool .* not (?:found|available)", re.I),
-     "Tip: that tool name isn't registered. Common mistakes: use "
-     "`terminal` (not bash/shell), `read_file` (not cat), `search_files` "
-     "(not grep/find), `write_file` (not echo >)."),
-    (re.compile(r"timeout|timed out", re.I),
-     "Tip: split the work, or pass a larger `timeout` arg. For long jobs "
-     "run with `background=true, notify_on_complete=true`."),
-    (re.compile(r"json\.decoder\.JSONDecodeError|invalid json", re.I),
-     "Tip: pass JSON as a real object, not a string. e.g. "
-     "`{\"key\":\"value\"}` directly in the args, not `'{\"key\":...}'`."),
-    (re.compile(r"context length|max(?:imum)? tokens|too many tokens", re.I),
-     "Tip: read smaller chunks with `read_file(offset=…, limit=…)`, or "
-     "narrow `search_files` with `include=…`."),
+    (
+        re.compile(r"no such file|enoent|file not found", re.I),
+        "Tip: the path didn't exist. Use `search_files` to locate it first, "
+        "or run `terminal(command='ls <dir>')` to inspect what's actually there.",
+    ),
+    (
+        re.compile(r"permission denied|eacces", re.I),
+        "Tip: avoid system dirs. Write under `$HERMES_HOME` (e.g. "
+        "`~/.hermes/tmp/`) or use `terminal(command='sudo …')` if you must.",
+    ),
+    (
+        re.compile(r"patch: .*failed to apply", re.I),
+        "Tip: `patch` is very sensitive to whitespace and line numbers. "
+        "If you are having trouble, try using `write_file` to overwrite the "
+        "entire file instead, especially if the file is small.",
+    ),
+    (
+        re.compile(r"command not found|: not found", re.I),
+        "Tip: that binary isn't on PATH. Try the Python equivalent inside "
+        "`execute_code(language='python', …)` or install with the project's "
+        "package manager first.",
+    ),
+    (
+        re.compile(r"no such tool|unknown tool|tool .* not (?:found|available)", re.I),
+        "Tip: that tool name isn't registered. Common mistakes: use "
+        "`terminal` (not bash/shell), `read_file` (not cat), `search_files` "
+        "(not grep/find), `write_file` (not echo >).",
+    ),
+    (
+        re.compile(r"timeout|timed out", re.I),
+        "Tip: split the work, or pass a larger `timeout` arg. For long jobs "
+        "run with `background=true, notify_on_complete=true`.",
+    ),
+    (
+        re.compile(r"json\.decoder\.JSONDecodeError|invalid json", re.I),
+        "Tip: pass JSON as a real object, not a string. e.g. "
+        '`{"key":"value"}` directly in the args, not `\'{"key":...}\'`.',
+    ),
+    (
+        re.compile(r"context length|max(?:imum)? tokens|too many tokens", re.I),
+        "Tip: read smaller chunks with `read_file(offset=…, limit=…)`, or narrow `search_files` with `include=…`.",
+    ),
 ]
 
 
@@ -916,6 +933,7 @@ _hint_cache_lock = threading.Lock()
 _custom_hint_cache: List[Tuple[re.Pattern, str]] = []
 _last_hint_cache_sig: Optional[str] = None
 
+
 def _match_error_hint(result_text: str) -> Optional[str]:
     global _custom_hint_cache, _last_hint_cache_sig
     if not result_text:
@@ -929,19 +947,19 @@ def _match_error_hint(result_text: str) -> Optional[str]:
     for pat, hint in _ERROR_HINTS:
         if pat.search(search_text):
             return hint
-    
+
     # Custom user-added hints with regex caching
     state = _load_state()
     hints = state.get("custom_hints", [])
     if not hints:
         return None
-        
+
     # Re-compile hints only if the list in state has changed
     try:
         current_sig = hashlib.md5(json.dumps(hints, sort_keys=True).encode(), usedforsecurity=False).hexdigest()
     except Exception:
         current_sig = None
-        
+
     if current_sig != _last_hint_cache_sig:
         with _hint_cache_lock:
             # Double-check after acquiring lock (another thread may have updated)
@@ -1008,7 +1026,9 @@ def _looks_like_error(result: Any, tool_name: str = "") -> bool:
     if tool_name in {"read_file", "search_files"}:
         if isinstance(result, str):
             lower_text = result_text[:200].lower()
-            if any(lower_text.startswith(p) for p in ("error:", "exception:", "permissionerror:", "filenotfounderror:")):
+            if any(
+                lower_text.startswith(p) for p in ("error:", "exception:", "permissionerror:", "filenotfounderror:")
+            ):
                 return True
             if "traceback (most recent call last)" in lower_text:
                 return True
@@ -1020,10 +1040,17 @@ def _looks_like_error(result: Any, tool_name: str = "") -> bool:
     else:
         chunk = result_text
     chunk_l = chunk.lower()
-    if any(k in chunk_l for k in (
-        "traceback", "exception", "errno", "no such file",
-        "permission denied", "command not found",
-    )):
+    if any(
+        k in chunk_l
+        for k in (
+            "traceback",
+            "exception",
+            "errno",
+            "no such file",
+            "permission denied",
+            "command not found",
+        )
+    ):
         return True
     return False
 
@@ -1035,7 +1062,7 @@ def _canonical_read_key_path(path: str) -> str:
     try:
         p = Path(path).expanduser()
         if not p.is_absolute():
-            p = (Path.cwd() / p)
+            p = Path.cwd() / p
         return str(p.resolve(strict=False))
     except Exception:
         return path
@@ -1069,9 +1096,9 @@ _HISTORY_CAP = 16
 _REANCHOR_EVERY = 10
 _CHEATSHEET_EVERY_TURNS = 25  # re-inject cheatsheet every N user turns
 _EVENT_CAP = 200
-_TOTAL_NUDGE_CAP = 8000     # cap total injected text (wired up in _pre_llm_call)
-_FIRST_USER_MSG_CAP = 1500    # cap re-anchor goal to 1.5k to avoid payload bloat
-_DYM_MAX_CANDIDATES = 500     # cap difflib candidate list for better latency
+_TOTAL_NUDGE_CAP = 8000  # cap total injected text (wired up in _pre_llm_call)
+_FIRST_USER_MSG_CAP = 1500  # cap re-anchor goal to 1.5k to avoid payload bloat
+_DYM_MAX_CANDIDATES = 500  # cap difflib candidate list for better latency
 
 # Per-nudge-kind throttle (Bug #2 fix: were referenced but never defined).
 # After a kind hits the per-window limit, suppress further emits of the same
@@ -1098,7 +1125,7 @@ _turn_count: Dict[str, int] = {}
 _session_lock = threading.RLock()
 
 _SESSION_TTL = 3600.0  # 1 hour
-_CLEANUP_INTERVAL = 300.0 # 5 minutes
+_CLEANUP_INTERVAL = 300.0  # 5 minutes
 _cleanup_timer: Optional[threading.Timer] = None
 
 # Stats are accumulated in memory and flushed to disk once per turn (at
@@ -1125,9 +1152,8 @@ _last_log_entry: Optional[Tuple[str, str, float]] = None
 
 _FINGERPRINT_MAX_DEPTH = 32  # Issue #10: cycle / depth guard for fingerprinting.
 
-def _fingerprint_value(key: str, value: Any,
-                        _seen: Optional[set] = None,
-                        _depth: int = 0) -> Any:
+
+def _fingerprint_value(key: str, value: Any, _seen: Optional[set] = None, _depth: int = 0) -> Any:
     """Normalize an arg value for stable loop fingerprints.
 
     Large strings are represented by full-content digests instead of being
@@ -1157,8 +1183,7 @@ def _fingerprint_value(key: str, value: Any,
             return {"__cycle__": True}
         _seen = _seen | {id(value)}
     if isinstance(value, dict):
-        return {str(k): _fingerprint_value(str(k), v, _seen, _depth + 1)
-                for k, v in value.items()}
+        return {str(k): _fingerprint_value(str(k), v, _seen, _depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_fingerprint_value(key, v, _seen, _depth + 1) for v in value]
     return value
@@ -1167,10 +1192,7 @@ def _fingerprint_value(key: str, value: Any,
 def _args_fingerprint(args: Dict[str, Any]) -> str:
     """Hash of args for loop detection without lossy truncation."""
     try:
-        lite = {
-            str(k): _fingerprint_value(str(k), v)
-            for k, v in args.items()
-        }
+        lite = {str(k): _fingerprint_value(str(k), v) for k, v in args.items()}
         s = json.dumps(lite, sort_keys=True, default=str)
     except Exception:
         s = repr(args)
@@ -1178,6 +1200,7 @@ def _args_fingerprint(args: Dict[str, Any]) -> str:
 
 
 _REDACT_KEYS = {"apikey", "token", "password", "secret", "privatekey", "auth"}
+
 
 def _redact_dict(data: Any) -> Any:
     """Recursively redact sensitive-looking values using substring matching."""
@@ -1201,7 +1224,7 @@ def _record_call(session_id: str, tool_name: str, args: Dict[str, Any]) -> bool:
         hist = _call_history.setdefault(sid, deque(maxlen=_HISTORY_CAP))
         hist.append(call_item)
         _call_count[sid] = _call_count.get(sid, 0) + 1
-        
+
         # 1. Simple repeat (A-A-A)
         if len(hist) >= _LOOP_REPEATS:
             tail = list(hist)[-_LOOP_REPEATS:]
@@ -1210,7 +1233,7 @@ def _record_call(session_id: str, tool_name: str, args: Dict[str, Any]) -> bool:
                     return False
                 _last_notified_loop[sid] = call_item
                 return True
-        
+
         # 2. Sequence loop (A-B-A-B)
         if len(hist) >= 4:
             items = list(hist)
@@ -1260,9 +1283,8 @@ def _record_event(session_id: str, kind: str, detail: str, **fields: Any) -> Non
             if (now - _last_event_rotation) > 10.0:
                 _rotate_file(EVENT_LOG_FILE, lock=_event_rotate_lock)
                 _last_event_rotation = now
-        with _event_log_lock:
-            with EVENT_LOG_FILE.open("a") as f:
-                f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+        with _event_log_lock, EVENT_LOG_FILE.open("a") as f:
+            f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
     except Exception as exc:
         # Issue #16 improvement: log swallowed exceptions so a silent failure
         # leaves a trail. Was previously `except Exception: pass`.
@@ -1273,7 +1295,7 @@ def _load_recent_events_from_disk(session_id: Optional[str], n: int) -> List[Dic
     if not EVENT_LOG_FILE.exists():
         return []
     try:
-        lines = EVENT_LOG_FILE.read_text().splitlines()[-max(n * 5, n):]
+        lines = EVENT_LOG_FILE.read_text().splitlines()[-max(n * 5, n) :]
     except Exception:
         return []
     events: List[Dict[str, Any]] = []
@@ -1304,10 +1326,7 @@ def _format_events(session_id: Optional[str] = None, n: int = 30) -> str:
     lines: List[str] = []
     for sid, events in items:
         for event in events[-n:]:
-            extras = {
-                k: v for k, v in event.items()
-                if k not in {"ts", "kind", "detail"}
-            }
+            extras = {k: v for k, v in event.items() if k not in {"ts", "kind", "detail"}}
             suffix = (" " + json.dumps(extras, sort_keys=True, default=str)) if extras else ""
             lines.append(f"{event['ts']} [{sid}] {event['kind']}: {event['detail']}{suffix}")
     if not lines:
@@ -1334,9 +1353,7 @@ def _queue_nudge(session_id: str, kind: str, text: str) -> None:
             return
         turn = _turn_count.get(sid, 0)
         by_kind = _nudge_throttle.setdefault(sid, {})
-        bucket_state = by_kind.setdefault(
-            kind, {"start": turn, "count": 0, "suppressed_until": -1}
-        )
+        bucket_state = by_kind.setdefault(kind, {"start": turn, "count": 0, "suppressed_until": -1})
         if turn - bucket_state.get("start", 0) >= _NUDGE_WINDOW_TURNS:
             bucket_state.update({"start": turn, "count": 0, "suppressed_until": -1})
         if turn <= bucket_state.get("suppressed_until", -1):
@@ -1398,6 +1415,7 @@ def _is_multistep_request(msg: str) -> bool:
 # "Did you mean…?" path suggestion
 # ---------------------------------------------------------------------------
 
+
 def _didyoumean_path(path: str) -> Optional[str]:
     """If *path* doesn't exist, propose the closest sibling in its parent dir.
 
@@ -1414,19 +1432,19 @@ def _didyoumean_path(path: str) -> Optional[str]:
         return None
     if p.exists():
         return None
-        
+
     # Climb up to find first existing ancestor.
     ancestor = p.parent
     while not ancestor.exists() and ancestor != ancestor.parent:
         ancestor = ancestor.parent
-        
+
     if not ancestor.exists() or not ancestor.is_dir():
         return None
-    
+
     # Skip DYM for known heavy/noise directories to avoid latency spikes
     if ancestor.name in {"node_modules", ".git", ".venv", "vendor", "__pycache__"}:
         return None
-        
+
     # Sample a bounded prefix of large directories.
     try:
         siblings: List[str] = []
@@ -1441,7 +1459,7 @@ def _didyoumean_path(path: str) -> Optional[str]:
         return None
     if not siblings:
         return None
-    
+
     # Case-insensitive mapping
     l_to_orig = {s.lower(): s for s in siblings}
     matches = difflib.get_close_matches(p.name.lower(), l_to_orig.keys(), n=1, cutoff=0.6)
@@ -1467,7 +1485,7 @@ def _didyoumean_tool(name: str) -> Optional[str]:
         return None
     if name in candidates:
         return None
-    
+
     l_to_orig = {c.lower(): c for c in candidates}
     matches = difflib.get_close_matches(name.lower(), l_to_orig.keys(), n=1, cutoff=0.6)
     if not matches:
@@ -1481,10 +1499,12 @@ def _didyoumean_tool(name: str) -> Optional[str]:
 # (get_entry, get_all_tool_names, get_schema) instead of `_tools` directly.
 # ---------------------------------------------------------------------------
 
+
 def _registry():
     """Lazy import + fail-soft accessor for the global tool registry."""
     try:
         from tools.registry import registry
+
         return registry
     except Exception as exc:  # pragma: no cover
         logger.debug("model-sherpa: tools.registry unavailable: %s", exc)
@@ -1584,19 +1604,17 @@ def _invalidate_tool_cache() -> None:
 # Tool-schema lookup (for schema-on-demand on arg failures)
 # ---------------------------------------------------------------------------
 
+
 def _render_schema_prop(name: str, prop: Any, required: bool, depth: int = 0) -> str:
     """Recursively render a JSON Schema property into a compact string."""
     star = "*" if required else ""
     if not isinstance(prop, dict) or depth > 3:
         return f"{name}{star}"
-    
+
     # Handle composite types (anyOf, oneOf, allOf)
     for key in ("anyOf", "oneOf", "allOf"):
         if key in prop and isinstance(prop[key], list):
-            choices = [
-                _render_schema_prop("", v, False, depth + 1).split(": ", 1)[-1]
-                for v in prop[key]
-            ]
+            choices = [_render_schema_prop("", v, False, depth + 1).split(": ", 1)[-1] for v in prop[key]]
             sep = " | " if key != "allOf" else " & "
             return f"{name}{star}: ({sep.join(choices)})"
 
@@ -1605,28 +1623,25 @@ def _render_schema_prop(name: str, prop: Any, required: bool, depth: int = 0) ->
         # Format enum values compactly
         choices = " | ".join(json.dumps(v) for v in prop["enum"])
         return f"{name}{star}: {choices}"
-    
+
     if ptype == "object" and "properties" in prop:
         inner_props = prop["properties"]
         req_set = set(prop.get("required") or [])
-        bits = [
-            _render_schema_prop(k, v, k in req_set, depth + 1)
-            for k, v in inner_props.items()
-        ]
+        bits = [_render_schema_prop(k, v, k in req_set, depth + 1) for k, v in inner_props.items()]
         return f"{name}{star}: {{ {', '.join(bits)} }}"
-    
+
     if ptype == "array" and "items" in prop:
         inner = _render_schema_prop("", prop["items"], False, depth + 1)
         # Strip the ": " prefix if it was returned by a nested object/array
         inner_val = inner.split(": ", 1)[-1] if ": " in inner else inner
         return f"{name}{star}: [{inner_val}]"
-        
+
     return f"{name}{star}: {ptype}"
 
 
 def _tool_schema_preview(tool_name: str) -> Optional[str]:
     """Return a compact recursive preview of the tool's schema.
-    
+
     Example: todo(todos*: [{id*: string, content*: string, status*: string}])
     """
     schema = _get_schema(tool_name) or {}
@@ -1637,10 +1652,7 @@ def _tool_schema_preview(tool_name: str) -> Optional[str]:
     required = set(params.get("required") or [])
     if not props or not isinstance(props, dict):
         return f"{tool_name}() — no parameters"
-    bits = [
-        _render_schema_prop(name, prop, name in required)
-        for name, prop in props.items()
-    ]
+    bits = [_render_schema_prop(name, prop, name in required) for name, prop in props.items()]
     return f"{tool_name}({', '.join(bits)})   * = required"
 
 
@@ -1649,24 +1661,22 @@ def _tool_schema_preview(tool_name: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 # Smart/curly quotes → straight quotes.
-_SMART_QUOTE_MAP = str.maketrans({
-    "\u201c": '"',   # “ → "
-    "\u201d": '"',   # ” → "
-    "\u2018": "'",   # ‘ → '
-    "\u2019": "'",   # ’ → '
-})
+_SMART_QUOTE_MAP = str.maketrans(
+    {
+        "\u201c": '"',  # “ → "
+        "\u201d": '"',  # ” → "
+        "\u2018": "'",  # ‘ → '
+        "\u2019": "'",  # ’ → '
+    }
+)
 
 # Leading prompt char: $ or % with optional space.
 _LEADING_PROMPT_RE = re.compile(r"^\s*[\$%]\s")
 
 # bash -c "..." / bash -c '...' wrapping (quotes optional).
-_BASH_WRAP_RE = re.compile(
-    r"^bash\s+(?:--?\w+\s+)*-[\w]*c\s+([\"']?)(.*?)\1\s*$", re.DOTALL
-)
+_BASH_WRAP_RE = re.compile(r"^bash\s+(?:--?\w+\s+)*-[\w]*c\s+([\"']?)(.*?)\1\s*$", re.DOTALL)
 # sh -c "..." variant (quotes optional).
-_SH_WRAP_RE = re.compile(
-    r"^sh\s+(?:--?\w+\s+)*-[\w]*c\s+([\"']?)(.*?)\1\s*$", re.DOTALL
-)
+_SH_WRAP_RE = re.compile(r"^sh\s+(?:--?\w+\s+)*-[\w]*c\s+([\"']?)(.*?)\1\s*$", re.DOTALL)
 
 # cd /abs/path && cmd  /  cd /abs/path; cmd.
 _CD_RE = re.compile(
@@ -1674,9 +1684,7 @@ _CD_RE = re.compile(
 )
 
 
-def _lint_terminal_command(
-    command: str, args: Dict[str, Any]
-) -> Tuple[str, List[str], int]:
+def _lint_terminal_command(command: str, args: Dict[str, Any]) -> Tuple[str, List[str], int]:
     """Inspect and repair a terminal command; return (command, warnings, fix_count).
 
     Detects and silently repairs four common model mistakes:
@@ -1702,7 +1710,7 @@ def _lint_terminal_command(
     # 2) Leading $ or % prompt.
     m = _LEADING_PROMPT_RE.match(command)
     if m:
-        command = command[m.end():]
+        command = command[m.end() :]
         fix_count += 1
 
     # 3) bash -c / sh -c wrapping.
@@ -1717,10 +1725,7 @@ def _lint_terminal_command(
                 fix_count += 1
             else:
                 # Complex inner command — warn instead.
-                warnings.append(
-                    "`bash -c` is unnecessary; `terminal` already runs bash. "
-                    "Pass the command directly."
-                )
+                warnings.append("`bash -c` is unnecessary; `terminal` already runs bash. Pass the command directly.")
             break
 
     # 4) cd /path && cmd → workdir + stripped command.
@@ -1736,10 +1741,10 @@ def _lint_terminal_command(
                 cd_path = parts[0]
         except Exception:
             pass
-        
+
         if not current_workdir:
             current_workdir = cd_path
-            command = command[m.end():]
+            command = command[m.end() :]
             fix_count += 1
         else:
             # Try to combine. If cd_path is absolute, it overrides.
@@ -1750,12 +1755,12 @@ def _lint_terminal_command(
                 if p_next.is_absolute():
                     current_workdir = str(p_next)
                 else:
-                    current_workdir = str((p_base / p_next))
-                command = command[m.end():]
+                    current_workdir = str(p_base / p_next)
+                command = command[m.end() :]
                 fix_count += 1
             except Exception:
                 break
-    
+
     if current_workdir != args.get("workdir"):
         args["workdir"] = current_workdir
 
@@ -1764,12 +1769,12 @@ def _lint_terminal_command(
 
 # Required-field hints used by arg_guard to produce helpful block messages.
 _REQUIRED_FIELD_HINTS: Dict[str, Dict[str, str]] = {
-    "terminal":     {"command": "non-empty shell string"},
-    "read_file":    {"path": "absolute or ~-relative path to an existing file"},
-    "write_file":   {"path": "target path", "content": "full file body (string)"},
+    "terminal": {"command": "non-empty shell string"},
+    "read_file": {"path": "absolute or ~-relative path to an existing file"},
+    "write_file": {"path": "target path", "content": "full file body (string)"},
     "search_files": {"pattern": "regex (for content) or glob like '*.py' (for files)"},
-    "memory":       {"action": "'add' | 'replace' | 'remove'", "target": "'memory' | 'user'"},
-    "skill_view":   {"name": "exact skill name (e.g. 'meta/self-evolution')"},
+    "memory": {"action": "'add' | 'replace' | 'remove'", "target": "'memory' | 'user'"},
+    "skill_view": {"name": "exact skill name (e.g. 'meta/self-evolution')"},
 }
 
 
@@ -1898,13 +1903,9 @@ def _missing_required_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
             action = action.strip()
         if action and action not in {"add", "replace", "remove"}:
             missing.append("action ('add' | 'replace' | 'remove')")
-        if action in {"add", "replace"} and _is_missing_required_value(
-            "memory", "content", args.get("content")
-        ):
+        if action in {"add", "replace"} and _is_missing_required_value("memory", "content", args.get("content")):
             missing.append("content (required for add/replace)")
-        if action in {"replace", "remove"} and _is_missing_required_value(
-            "memory", "old_text", args.get("old_text")
-        ):
+        if action in {"replace", "remove"} and _is_missing_required_value("memory", "old_text", args.get("old_text")):
             missing.append("old_text (unique text identifying existing entry)")
         target = args.get("target")
         if isinstance(target, str):
@@ -1930,9 +1931,7 @@ def _missing_required_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
                     missing.append(f"todos[{i}].{field} (required)")
             status = item.get("status")
             if isinstance(status, str) and status and status not in valid_statuses:
-                missing.append(
-                    f"todos[{i}].status (pending|in_progress|completed|cancelled)"
-                )
+                missing.append(f"todos[{i}].status (pending|in_progress|completed|cancelled)")
         return list(dict.fromkeys(missing or schema_missing))
 
     if tool_name == "patch":
@@ -1940,28 +1939,38 @@ def _missing_required_args(tool_name: str, args: Dict[str, Any]) -> List[str]:
         if mode is None or (isinstance(mode, str) and not mode.strip()):
             mode = "patch" if args.get("patch") else "replace"
         if mode not in {"replace", "patch"}:
-            return list(dict.fromkeys(schema_missing + ["mode ('replace' or 'patch')"]))
+            return list(dict.fromkeys([*schema_missing, "mode ('replace' or 'patch')"]))
         if mode == "patch":
             if _is_missing_required_value("patch", "patch", args.get("patch")):
-                return list(dict.fromkeys(schema_missing + ["patch (V4A patch content)"]))
+                return list(dict.fromkeys([*schema_missing, "patch (V4A patch content)"]))
             return schema_missing
         required = {
             "path": "target file path",
             "old_string": "text to find",
             "new_string": "replacement text (may be empty)",
         }
-        return list(dict.fromkeys(schema_missing + [
-            f"{field} ({desc})"
-            for field, desc in required.items()
-            if _is_missing_required_value("patch", field, args.get(field))
-        ]))
+        return list(
+            dict.fromkeys(
+                schema_missing
+                + [
+                    f"{field} ({desc})"
+                    for field, desc in required.items()
+                    if _is_missing_required_value("patch", field, args.get(field))
+                ]
+            )
+        )
 
     req = _REQUIRED_FIELD_HINTS.get(tool_name) or {}
-    return list(dict.fromkeys(schema_missing + [
-        f"{field} ({desc})"
-        for field, desc in req.items()
-        if _is_missing_required_value(tool_name, field, args.get(field))
-    ]))
+    return list(
+        dict.fromkeys(
+            schema_missing
+            + [
+                f"{field} ({desc})"
+                for field, desc in req.items()
+                if _is_missing_required_value(tool_name, field, args.get(field))
+            ]
+        )
+    )
 
 
 def _pre_tool_call(
@@ -1994,8 +2003,9 @@ def _pre_tool_call(
         )
     except Exception as exc:
         logger.exception(
-            "model-sherpa: _pre_tool_call failed for tool=%s (%s); "
-            "failing open with original args", tool_name, exc,
+            "model-sherpa: _pre_tool_call failed for tool=%s (%s); failing open with original args",
+            tool_name,
+            exc,
         )
         return None
 
@@ -2037,9 +2047,7 @@ def _pre_tool_call_impl(
         raw_cmd = (effective_args.get("command") or "").strip()
         if raw_cmd:
             lint_args = effective_args
-            new_cmd, warnings, lint_count = _lint_terminal_command(
-                raw_cmd, lint_args
-            )
+            new_cmd, warnings, lint_count = _lint_terminal_command(raw_cmd, lint_args)
             if lint_count:
                 stat_key = "dry_runs" if dry_run else "cmd_lints"
                 _bump_tool_stat(tool_name, stat_key, lint_count)
@@ -2062,15 +2070,16 @@ def _pre_tool_call_impl(
     if _feature("arg_guard"):
         missing = _missing_required_args(tool_name, effective_args)
         if missing:
-            schema_preview = (
-                _tool_schema_preview(tool_name)
-                if _feature("schema_on_demand") else None
-            )
+            schema_preview = _tool_schema_preview(tool_name) if _feature("schema_on_demand") else None
             _bump_tool_stat(tool_name, "dry_runs" if dry_run else "arg_blocks")
             _log_correction("arg_block", f"{tool_name}: missing {missing}")
             _record_event(
-                session_id, "arg_block", f"{tool_name}: missing {missing}",
-                tool=tool_name, missing=missing, dry_run=dry_run,
+                session_id,
+                "arg_block",
+                f"{tool_name}: missing {missing}",
+                tool=tool_name,
+                missing=missing,
+                dry_run=dry_run,
             )
             msg = (
                 f"[SHERPA] `{tool_name}` blocked: missing required arg(s): "
@@ -2093,7 +2102,7 @@ def _pre_tool_call_impl(
                 limit = int(effective_args.get("limit", 500))
             except Exception:
                 offset, limit = 1, 500
-            
+
             new_range = (offset, offset + limit - 1)
             sid = session_id or "default"
             blocked = False
@@ -2107,19 +2116,23 @@ def _pre_tool_call_impl(
                         break
                 if not blocked:
                     history.append(new_range)
-                    
+
             if blocked:
                 _bump_tool_stat(tool_name, "dry_runs" if dry_run else "read_blocks")
                 _log_correction("read_block", f"{path} range={new_range} (subset)")
                 msg = (
-                        f"[SHERPA] You've already read this part of `{path}` "
-                        f"(range {new_range[0]}-{new_range[1]}) this turn. "
-                        "The content is in your context above — re-read your "
-                        "own previous output instead of re-fetching."
-                    )
+                    f"[SHERPA] You've already read this part of `{path}` "
+                    f"(range {new_range[0]}-{new_range[1]}) this turn. "
+                    "The content is in your context above — re-read your "
+                    "own previous output instead of re-fetching."
+                )
                 _record_event(
-                    session_id, "read_block", f"{path} range={new_range} (subset)",
-                    tool=tool_name, path=path, dry_run=dry_run,
+                    session_id,
+                    "read_block",
+                    f"{path} range={new_range} (subset)",
+                    tool=tool_name,
+                    path=path,
+                    dry_run=dry_run,
                 )
                 if dry_run:
                     _queue_nudge(session_id, "dry_run", msg.replace("[SHERPA]", "[SHERPA dry-run] Would block"))
@@ -2152,11 +2165,12 @@ def _post_tool_call(
         _log_correction("loop", f"{tool_name} repeated {_LOOP_REPEATS}x")
         _record_event(session_id, "loop", f"{tool_name} repeated {_LOOP_REPEATS}x", tool=tool_name)
         _queue_nudge(
-            session_id, "loop",
+            session_id,
+            "loop",
             f"[SHERPA] You called `{tool_name}` with the same args "
             f"{_LOOP_REPEATS} times in a row — that's a loop. STOP and "
             "change strategy: try different args, a different tool, or "
-            "summarise what you know so far and answer."
+            "summarise what you know so far and answer.",
         )
 
     # Bump per-session call counter for re-anchor cadence
@@ -2178,30 +2192,39 @@ def _post_tool_call(
                 if guess and guess != path:
                     _bump_tool_stat(tool_name, "didyoumean")
                     _record_event(
-                        session_id, "didyoumean", f"{path} → {guess}",
-                        tool=tool_name, path=path, suggestion=guess,
+                        session_id,
+                        "didyoumean",
+                        f"{path} → {guess}",
+                        tool=tool_name,
+                        path=path,
+                        suggestion=guess,
                     )
                     _queue_nudge(
-                        session_id, "didyoumean",
+                        session_id,
+                        "didyoumean",
                         f"[SHERPA] `{path}` doesn't exist — did you mean `{guess}`?",
                     )
 
         # Did-you-mean: unknown tool → propose closest registered name
         if _feature("didyoumean") and re.search(
             r"no such tool|unknown tool|tool .* not (?:found|available)",
-            result_text, re.I,
+            result_text,
+            re.I,
         ):
             guess = _didyoumean_tool(tool_name)
             if guess:
                 _bump_tool_stat(tool_name, "tool_dym")
                 _record_event(
-                    session_id, "tool_dym", f"{tool_name} → {guess}",
-                    tool=tool_name, suggestion=guess,
+                    session_id,
+                    "tool_dym",
+                    f"{tool_name} → {guess}",
+                    tool=tool_name,
+                    suggestion=guess,
                 )
                 _queue_nudge(
-                    session_id, "didyoumean",
-                    f"[SHERPA] `{tool_name}` isn't a registered tool — "
-                    f"did you mean `{guess}`?",
+                    session_id,
+                    "didyoumean",
+                    f"[SHERPA] `{tool_name}` isn't a registered tool — did you mean `{guess}`?",
                 )
 
         if streak >= 2:
@@ -2270,7 +2293,7 @@ def _pre_llm_call(
     sid = session_id or "default"
     with _session_lock:
         _last_access[sid] = time.time()
-    
+
     # Cache the first user message for re-anchor injection later. Keep
     # most of the prompt (was 600 chars — too short for non-trivial goals)
     # so the re-anchor nudge can actually re-state what the user asked for.
@@ -2341,19 +2364,27 @@ def _pre_llm_call(
 
     if not parts:
         return None
-    
+
     combined = "\n\n".join(parts)
     # Hard cap on total injected text to avoid drowning out actual tool outputs
     if len(combined) > _TOTAL_NUDGE_CAP:
         combined = combined[:_TOTAL_NUDGE_CAP] + "\n... [TRUNCATED BY SHERPA]"
-        
+
     return {"context": combined}
 
 
 _PER_SESSION_DICTS = (
-    _call_history, _pending_nudges, _session_events, _nudge_throttle,
-    _call_count, _error_streak, _first_user_msg, _read_history,
-    _calls_since_reanchor, _turn_count, _last_notified_loop,
+    _call_history,
+    _pending_nudges,
+    _session_events,
+    _nudge_throttle,
+    _call_count,
+    _error_streak,
+    _first_user_msg,
+    _read_history,
+    _calls_since_reanchor,
+    _turn_count,
+    _last_notified_loop,
     _last_access,
 )
 
@@ -2368,7 +2399,7 @@ def _cleanup_stale_sessions() -> None:
                 stale.append(sid)
     for sid in stale:
         _clear_session(sid)
-    
+
     global _cleanup_timer
     with _timer_lock:
         with _session_lock:
@@ -2455,11 +2486,13 @@ def _on_session_end(session_id: str = "", **_: Any) -> None:
 # Hallucinated-tool aliases (bash/cat/grep/find/ls/head/tail/...)
 # ---------------------------------------------------------------------------
 
-def _alias_handler(real_tool: str,
-                   arg_map: Optional[Dict[str, str]] = None,
-                   fixed_args: Optional[Dict[str, Any]] = None,
-                   build_command: Optional[Callable[[Dict[str, Any]], str]] = None
-                   ) -> Callable:
+
+def _alias_handler(
+    real_tool: str,
+    arg_map: Optional[Dict[str, str]] = None,
+    fixed_args: Optional[Dict[str, Any]] = None,
+    build_command: Optional[Callable[[Dict[str, Any]], str]] = None,
+) -> Callable:
     """Build a handler that silently re-dispatches to *real_tool*.
 
     Dispatch goes through ``handle_function_call`` so the real tool sees
@@ -2468,6 +2501,7 @@ def _alias_handler(real_tool: str,
     ``registry.dispatch`` only when ``handle_function_call`` is unavailable
     (e.g. unit tests with a stub registry).
     """
+
     def handler(args, **kw):
         if not _feature("aliases") or not _feature("alias_tools"):
             return json.dumps({"error": "model-sherpa aliases are disabled"})
@@ -2493,8 +2527,9 @@ def _alias_handler(real_tool: str,
             from model_tools import handle_function_call
         except ImportError as exc:
             logger.debug(
-                "model-sherpa: handle_function_call unavailable for alias %s "
-                "(%s); falling back to registry.dispatch", real_tool, exc,
+                "model-sherpa: handle_function_call unavailable for alias %s (%s); falling back to registry.dispatch",
+                real_tool,
+                exc,
             )
             reg = _registry()
             if reg is None:
@@ -2502,22 +2537,26 @@ def _alias_handler(real_tool: str,
             dispatch = getattr(reg, "dispatch", None)
             if dispatch is None:
                 logger.warning(
-                    "model-sherpa: registry has no 'dispatch' attribute "
-                    "(%s); cannot fall back for alias %s", reg, real_tool,
+                    "model-sherpa: registry has no 'dispatch' attribute (%s); cannot fall back for alias %s",
+                    reg,
+                    real_tool,
                 )
                 return json.dumps({"error": "alias dispatch unavailable: registry has no dispatch method"})
             return dispatch(
-                real_tool, real_args,
+                real_tool,
+                real_args,
                 task_id=kw.get("task_id"),
                 user_task=kw.get("user_task"),
             )
         return handle_function_call(
-            real_tool, real_args,
+            real_tool,
+            real_args,
             task_id=kw.get("task_id"),
             tool_call_id=kw.get("tool_call_id"),
             session_id=kw.get("session_id"),
             user_task=kw.get("user_task"),
         )
+
     return handler
 
 
@@ -2564,107 +2603,161 @@ _TERMINAL_ALIAS_SCHEMA_PARAMS: Dict[str, Dict[str, Any]] = {
 
 _ALIAS_SPECS: List[Dict[str, Any]] = [
     # bash / shell family → terminal
-    {"name": "bash", "real": "terminal", "toolset": "terminal",
-     "desc": "Alias of `terminal`. Runs a shell command.",
-     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
-     "required": ["command"]},
-    {"name": "shell", "real": "terminal", "toolset": "terminal",
-     "desc": "Alias of `terminal`. Runs a shell command.",
-     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
-     "required": ["command"]},
-    {"name": "sh", "real": "terminal", "toolset": "terminal",
-     "desc": "Alias of `terminal`. Runs a shell command.",
-     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
-     "required": ["command"]},
-    {"name": "exec", "real": "terminal", "toolset": "terminal",
-     "desc": "Alias of `terminal`. Runs a shell command.",
-     "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
-     "required": ["command"]},
+    {
+        "name": "bash",
+        "real": "terminal",
+        "toolset": "terminal",
+        "desc": "Alias of `terminal`. Runs a shell command.",
+        "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
+        "required": ["command"],
+    },
+    {
+        "name": "shell",
+        "real": "terminal",
+        "toolset": "terminal",
+        "desc": "Alias of `terminal`. Runs a shell command.",
+        "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
+        "required": ["command"],
+    },
+    {
+        "name": "sh",
+        "real": "terminal",
+        "toolset": "terminal",
+        "desc": "Alias of `terminal`. Runs a shell command.",
+        "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
+        "required": ["command"],
+    },
+    {
+        "name": "exec",
+        "real": "terminal",
+        "toolset": "terminal",
+        "desc": "Alias of `terminal`. Runs a shell command.",
+        "schema_params": _TERMINAL_ALIAS_SCHEMA_PARAMS,
+        "required": ["command"],
+    },
     # cat → read_file
-    {"name": "cat", "real": "read_file", "toolset": "file",
-     "desc": "Alias of `read_file`. Reads a text file.",
-     "schema_params": {"path": {"type": "string", "description": "File path"}},
-     "arg_map": {"path": "path", "file": "path", "filename": "path"},
-     "required": ["path"]},
+    {
+        "name": "cat",
+        "real": "read_file",
+        "toolset": "file",
+        "desc": "Alias of `read_file`. Reads a text file.",
+        "schema_params": {"path": {"type": "string", "description": "File path"}},
+        "arg_map": {"path": "path", "file": "path", "filename": "path"},
+        "required": ["path"],
+    },
     # head / tail → terminal (literal command).
     # `path` is required; `n` defaults to 10 in _build_head_command/_build_tail_command.
-    {"name": "head", "real": "terminal", "toolset": "terminal",
-     "desc": "Alias that runs `head -n N PATH` via terminal.",
-     "schema_params": {
-        "path": {"type": "string", "description": "File path"},
-        "n":    {"type": "integer", "description": "Number of lines (default 10)"},
-     },
-     "build_command": _build_head_command,
-     "required": ["path"]},
-    {"name": "tail", "real": "terminal", "toolset": "terminal",
-     "desc": "Alias that runs `tail -n N PATH` via terminal.",
-     "schema_params": {
-        "path": {"type": "string", "description": "File path"},
-        "n":    {"type": "integer", "description": "Number of lines (default 10)"},
-     },
-     "build_command": _build_tail_command,
-     "required": ["path"]},
+    {
+        "name": "head",
+        "real": "terminal",
+        "toolset": "terminal",
+        "desc": "Alias that runs `head -n N PATH` via terminal.",
+        "schema_params": {
+            "path": {"type": "string", "description": "File path"},
+            "n": {"type": "integer", "description": "Number of lines (default 10)"},
+        },
+        "build_command": _build_head_command,
+        "required": ["path"],
+    },
+    {
+        "name": "tail",
+        "real": "terminal",
+        "toolset": "terminal",
+        "desc": "Alias that runs `tail -n N PATH` via terminal.",
+        "schema_params": {
+            "path": {"type": "string", "description": "File path"},
+            "n": {"type": "integer", "description": "Number of lines (default 10)"},
+        },
+        "build_command": _build_tail_command,
+        "required": ["path"],
+    },
     # grep / rg / egrep → search_files (content)
-    {"name": "grep", "real": "search_files", "toolset": "file",
-     "desc": "Alias of `search_files`. Searches file contents.",
-     "schema_params": {
-        "pattern": {"type": "string", "description": "Regex pattern"},
-        "path":    {"type": "string", "description": "Directory or file to search"},
-     },
-     "arg_map": {"pattern": "pattern", "path": "path", "regex": "pattern",
-                 "query": "pattern", "directory": "path"},
-     "fixed":   {"target": "content"},
-     "required": ["pattern"]},
-    {"name": "rg", "real": "search_files", "toolset": "file",
-     "desc": "Alias of `search_files`. Ripgrep-style content search.",
-     "schema_params": {
-        "pattern": {"type": "string", "description": "Regex pattern"},
-        "path":    {"type": "string", "description": "Directory or file to search"},
-     },
-     "arg_map": {"pattern": "pattern", "path": "path", "regex": "pattern",
-                 "query": "pattern", "directory": "path"},
-     "fixed":   {"target": "content"},
-     "required": ["pattern"]},
-    {"name": "egrep", "real": "search_files", "toolset": "file",
-     "desc": "Alias of `search_files`. Extended regex content search.",
-     "schema_params": {
-        "pattern": {"type": "string", "description": "Regex pattern"},
-        "path":    {"type": "string", "description": "Directory or file to search"},
-     },
-     "arg_map": {"pattern": "pattern", "path": "path"},
-     "fixed":   {"target": "content"},
-     "required": ["pattern"]},
+    {
+        "name": "grep",
+        "real": "search_files",
+        "toolset": "file",
+        "desc": "Alias of `search_files`. Searches file contents.",
+        "schema_params": {
+            "pattern": {"type": "string", "description": "Regex pattern"},
+            "path": {"type": "string", "description": "Directory or file to search"},
+        },
+        "arg_map": {"pattern": "pattern", "path": "path", "regex": "pattern", "query": "pattern", "directory": "path"},
+        "fixed": {"target": "content"},
+        "required": ["pattern"],
+    },
+    {
+        "name": "rg",
+        "real": "search_files",
+        "toolset": "file",
+        "desc": "Alias of `search_files`. Ripgrep-style content search.",
+        "schema_params": {
+            "pattern": {"type": "string", "description": "Regex pattern"},
+            "path": {"type": "string", "description": "Directory or file to search"},
+        },
+        "arg_map": {"pattern": "pattern", "path": "path", "regex": "pattern", "query": "pattern", "directory": "path"},
+        "fixed": {"target": "content"},
+        "required": ["pattern"],
+    },
+    {
+        "name": "egrep",
+        "real": "search_files",
+        "toolset": "file",
+        "desc": "Alias of `search_files`. Extended regex content search.",
+        "schema_params": {
+            "pattern": {"type": "string", "description": "Regex pattern"},
+            "path": {"type": "string", "description": "Directory or file to search"},
+        },
+        "arg_map": {"pattern": "pattern", "path": "path"},
+        "fixed": {"target": "content"},
+        "required": ["pattern"],
+    },
     # find → search_files (files)
-    {"name": "find", "real": "search_files", "toolset": "file",
-     "desc": "Alias of `search_files target='files'`. Finds files by name.",
-     "schema_params": {
-        "pattern": {"type": "string", "description": "Glob pattern (e.g. *.py)"},
-        "path":    {"type": "string", "description": "Directory to search"},
-     },
-     "arg_map": {"pattern": "pattern", "path": "path", "name": "pattern",
-                 "glob": "pattern"},
-     "fixed":   {"target": "files"},
-     "required": ["pattern"]},
+    {
+        "name": "find",
+        "real": "search_files",
+        "toolset": "file",
+        "desc": "Alias of `search_files target='files'`. Finds files by name.",
+        "schema_params": {
+            "pattern": {"type": "string", "description": "Glob pattern (e.g. *.py)"},
+            "path": {"type": "string", "description": "Directory to search"},
+        },
+        "arg_map": {"pattern": "pattern", "path": "path", "name": "pattern", "glob": "pattern"},
+        "fixed": {"target": "files"},
+        "required": ["pattern"],
+    },
     # ls → terminal (literal command, since ls flags vary).
     # `path` is intentionally NOT required: _build_ls_command defaults to ".".
-    {"name": "ls", "real": "terminal", "toolset": "terminal",
-     "desc": "Alias that runs `ls -la PATH` via terminal.",
-     "schema_params": {
-        "path": {"type": "string", "description": "Directory to list (default .)"},
-        "long": {"type": "boolean", "description": "Pass -la"},
-     },
-     "build_command": _build_ls_command,
-     "required": []},
+    {
+        "name": "ls",
+        "real": "terminal",
+        "toolset": "terminal",
+        "desc": "Alias that runs `ls -la PATH` via terminal.",
+        "schema_params": {
+            "path": {"type": "string", "description": "Directory to list (default .)"},
+            "long": {"type": "boolean", "description": "Pass -la"},
+        },
+        "build_command": _build_ls_command,
+        "required": [],
+    },
     # skill → skill_view
-    {"name": "skill", "real": "skill_view", "toolset": "skills",
-     "desc": "Alias of `skill_view`. Loads a saved skill.",
-     "schema_params": {
-        "name": {"type": "string", "description": "Skill name"},
-        "file_path": {"type": "string", "description": "Optional file within the skill"},
-     },
-     "arg_map": {"name": "name", "skill": "name", "skill_name": "name",
-                 "file_path": "file_path", "path": "file_path"},
-     "required": ["name"]},
+    {
+        "name": "skill",
+        "real": "skill_view",
+        "toolset": "skills",
+        "desc": "Alias of `skill_view`. Loads a saved skill.",
+        "schema_params": {
+            "name": {"type": "string", "description": "Skill name"},
+            "file_path": {"type": "string", "description": "Optional file within the skill"},
+        },
+        "arg_map": {
+            "name": "name",
+            "skill": "name",
+            "skill_name": "name",
+            "file_path": "file_path",
+            "path": "file_path",
+        },
+        "required": ["name"],
+    },
 ]
 
 _SOFT_ALIAS_TARGETS = {spec["name"]: spec["real"] for spec in _ALIAS_SPECS}
@@ -2695,8 +2788,7 @@ def _register_aliases(ctx) -> int:
             required = list(spec["schema_params"].keys())[:1]
         schema = {
             "name": name,
-            "description": "[sherpa alias] " + spec["desc"] +
-                " Silently dispatches to `" + spec["real"] + "`.",
+            "description": "[sherpa alias] " + spec["desc"] + " Silently dispatches to `" + spec["real"] + "`.",
             "parameters": {
                 "type": "object",
                 "properties": spec["schema_params"],
@@ -2786,8 +2878,14 @@ def _doctor_report() -> str:
     alias_registered = [a["name"] for a in _ALIAS_SPECS if a["name"] in names]
     alias_missing = [a["name"] for a in _ALIAS_SPECS if a["name"] not in names]
     required_tools = [
-        "terminal", "read_file", "search_files", "write_file",
-        "patch", "todo", "memory", "skill_view",
+        "terminal",
+        "read_file",
+        "search_files",
+        "write_file",
+        "patch",
+        "todo",
+        "memory",
+        "skill_view",
     ]
     missing_tools = [name for name in required_tools if name not in names]
     schema_issues: List[str] = []
@@ -2888,22 +2986,24 @@ def _handle_slash(raw: str) -> str:
         if len(argv) < 3:
             s = _load_state()
             feats = s.get("features") or {}
-            return "Features:\n" + "\n".join(
-                f"  {k}: {'ON' if v else 'off'}" for k, v in feats.items()
-            ) + "\n\nUsage: /sherpa feature <name> <on|off>"
+            return (
+                "Features:\n"
+                + "\n".join(f"  {k}: {'ON' if v else 'off'}" for k, v in feats.items())
+                + "\n\nUsage: /sherpa feature <name> <on|off>"
+            )
         name = argv[1]
         val = argv[2].lower()
         if val not in {"on", "off", "true", "false", "1", "0"}:
             return f"Invalid value '{val}'. Use on|off."
-        
+
         alias_tools_on = val in {"on", "true", "1"}
         s = _load_state()
         if name not in (s.get("features") or {}):
-            return (f"Unknown feature '{name}'. Available: "
-                    + ", ".join(s.get('features', {}).keys()))
-        
+            return f"Unknown feature '{name}'. Available: " + ", ".join(s.get("features", {}).keys())
+
         def update_feat(st):
             st["features"][name] = alias_tools_on
+
         _update_state(update_feat)
 
         if name == "alias_tools":
@@ -2923,8 +3023,7 @@ def _handle_slash(raw: str) -> str:
         if not names and _registry() is None:
             return "Could not inspect registry."
         registered = [a["name"] for a in _ALIAS_SPECS if a["name"] in names]
-        not_registered = [a["name"] for a in _ALIAS_SPECS
-                          if a["name"] not in registered]
+        not_registered = [a["name"] for a in _ALIAS_SPECS if a["name"] not in registered]
         hard_enabled = _feature("alias_tools")
         soft_enabled = _feature("aliases")
         lines = [
@@ -2972,14 +3071,14 @@ def _handle_slash(raw: str) -> str:
             re.compile(pat, re.I)
         except re.error as e:
             return f"[SHERPA] Invalid regular expression pattern: {e}"
-        
+
         def update_hints(st):
             existing = [h for h in st["custom_hints"] if h["pattern"] == pat]
             if existing:
                 existing[0]["hint"] = hint
             else:
                 st["custom_hints"].append({"pattern": pat, "hint": hint})
-        
+
         s = _update_state(update_hints)
         return f"Added custom hint for /{pat}/ ({len(s['custom_hints'])} total)."
 
@@ -3026,18 +3125,22 @@ def _help_with_status() -> str:
     state = _load_state()
     stats = state.get("stats") or {}
     feats = state.get("features") or {}
-    feat_lines = "\n".join(
-        f"            {k:18} {'ON' if v else 'off'}" for k, v in feats.items()
-    )
+    feat_lines = "\n".join(f"            {k:18} {'ON' if v else 'off'}" for k, v in feats.items())
     # Build per-tool histogram.
     per_tool = stats.get("per_tool", {}) or {}
     tool_lines = ""
     if per_tool:
         _STAT_LABELS = {
-            "rewrites": "rw", "arg_blocks": "arg", "read_blocks": "rd",
-            "loops": "lp", "hints": "hint", "didyoumean": "dym",
-            "aliases_used": "alias", "cmd_lints": "lint",
-            "tool_dym": "tdym", "dry_runs": "dry",
+            "rewrites": "rw",
+            "arg_blocks": "arg",
+            "read_blocks": "rd",
+            "loops": "lp",
+            "hints": "hint",
+            "didyoumean": "dym",
+            "aliases_used": "alias",
+            "cmd_lints": "lint",
+            "tool_dym": "tdym",
+            "dry_runs": "dry",
         }
         # Sort by total corrections descending.
         ranked = sorted(
@@ -3058,25 +3161,25 @@ def _help_with_status() -> str:
     return textwrap.dedent(f"""\
         **model-sherpa** — guide-rails for all models
 
-          enabled : {state.get('enabled')}
-          custom-hints : {len(state.get('custom_hints', []))}
+          enabled : {state.get("enabled")}
+          custom-hints : {len(state.get("custom_hints", []))}
 
           **Features** (toggle with /sherpa feature <name> <on|off>):
 {feat_lines}
 
         **Lifetime stats** (persisted):
-          silent arg rewrites : {stats.get('rewrites', 0)}
-          error hints fired   : {stats.get('hints', 0)}
-          loops detected      : {stats.get('loops', 0)}
-          cheatsheets shown   : {stats.get('cheatsheets', 0)}
-          alias dispatches    : {stats.get('aliases_used', 0)}
-          did-you-mean        : {stats.get('didyoumean', 0)}
-          goal re-anchors     : {stats.get('reanchors', 0)}
-          plan-first nudges   : {stats.get('plan_nudges', 0)}
-          arg-guard blocks    : {stats.get('arg_blocks', 0)}
-          read-damper blocks  : {stats.get('read_blocks', 0)}
-          dry-run advisories  : {stats.get('dry_runs', 0)}
-          nudges suppressed   : {stats.get('nudges_suppressed', 0)}
+          silent arg rewrites : {stats.get("rewrites", 0)}
+          error hints fired   : {stats.get("hints", 0)}
+          loops detected      : {stats.get("loops", 0)}
+          cheatsheets shown   : {stats.get("cheatsheets", 0)}
+          alias dispatches    : {stats.get("aliases_used", 0)}
+          did-you-mean        : {stats.get("didyoumean", 0)}
+          goal re-anchors     : {stats.get("reanchors", 0)}
+          plan-first nudges   : {stats.get("plan_nudges", 0)}
+          arg-guard blocks    : {stats.get("arg_blocks", 0)}
+          read-damper blocks  : {stats.get("read_blocks", 0)}
+          dry-run advisories  : {stats.get("dry_runs", 0)}
+          nudges suppressed   : {stats.get("nudges_suppressed", 0)}
 {tool_lines}
         {_HELP}""")
 
@@ -3084,6 +3187,7 @@ def _help_with_status() -> str:
 # ---------------------------------------------------------------------------
 # Plugin entry point
 # ---------------------------------------------------------------------------
+
 
 def register(ctx) -> None:
     global _plugin_ctx
@@ -3114,6 +3218,5 @@ def register(ctx) -> None:
         _invalidate_tool_cache()
     # Session cleanup safety net
     _ensure_cleanup_task()
-    
-    logger.info("model-sherpa loaded (state=%s, %d aliases registered)",
-                STATE_FILE, n_aliases)
+
+    logger.info("model-sherpa loaded (state=%s, %d aliases registered)", STATE_FILE, n_aliases)

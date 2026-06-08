@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "model-sherpa"
+version = "0.3.1"
+description = "Guide-rails and sentinel layer for LLM agents — silent arg repair, loop detection, error hints, and diagnostics."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Mikey", email = "nordicnode@gmail.com"},
+]
+keywords = ["llm", "ai-agent", "hermes", "tool-calling", "guardrails", "middleware"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/nordicnode/model-sherpa"
+Repository = "https://github.com/nordicnode/model-sherpa"
+Issues = "https://github.com/nordicnode/model-sherpa/issues"
+
+[tool.setuptools]
+py-modules = ["__init__"]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "E741",   # ambiguous variable name (l, O, I)
+    "B008",   # function call in default argument
+    "SIM102", # nested if — readability sometimes better
+    "SIM103", # return condition directly — readability over brevity
+    "SIM105", # contextlib.suppress — try/except/pass is clearer
+    "SIM108", # ternary operator — readability over brevity
+    "RUF003", # ambiguous chars in comments (smart-quote map)
+    "RUF012", # mutable class variables
+    "UP006",  # deprecated typing.Dict/List/Tuple — too many to fix now
+    "UP035",  # deprecated typing imports — same
+    "UP045",  # Optional[X] → X | None — too many to fix now
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "SIM", "RUF059"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

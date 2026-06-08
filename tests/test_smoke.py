@@ -25,10 +25,10 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Fixture: load the plugin fresh against a temporary HERMES_HOME.
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def sherpa_home(monkeypatch, tmp_path):
@@ -56,6 +56,7 @@ def mod(sherpa_home):
 # Bug #1: _lock_state_file uses the right lock file path.
 # ---------------------------------------------------------------------------
 
+
 def test_lock_state_file_uses_lock_file_constant(mod, sherpa_home):
     """The lock file constant exists and is the expected path."""
     assert hasattr(mod, "LOCK_FILE"), "LOCK_FILE constant missing"
@@ -74,6 +75,7 @@ def test_lock_state_file_acquires_and_releases(mod, sherpa_home):
 # ---------------------------------------------------------------------------
 # Bug #2: _queue_nudge uses the throttle constants.
 # ---------------------------------------------------------------------------
+
 
 def test_nudge_window_constants_exist(mod):
     assert hasattr(mod, "_NUDGE_WINDOW_TURNS")
@@ -103,14 +105,14 @@ def test_queue_nudge_does_not_raise_within_window(mod, sherpa_home):
     mod._flush_stats()
     state = mod._load_state()
     assert state["stats"].get("nudges_suppressed", 0) >= 1, (
-        "nudges_suppressed counter should be at least 1 after exceeding "
-        "the per-window limit"
+        "nudges_suppressed counter should be at least 1 after exceeding the per-window limit"
     )
 
 
 # ---------------------------------------------------------------------------
 # Bug #3: _record_event writes to events.jsonl even on the first call.
 # ---------------------------------------------------------------------------
+
 
 def test_record_event_writes_to_disk_on_first_call(mod, sherpa_home):
     """_record_event used to raise UnboundLocalError on the first call (the
@@ -134,6 +136,7 @@ def test_record_event_writes_to_disk_on_first_call(mod, sherpa_home):
 # Bug #4: _on_session_end does not raise.
 # ---------------------------------------------------------------------------
 
+
 def test_on_session_end_does_not_raise(mod, sherpa_home):
     """The original code raised UnboundLocalError because _cleanup_timer
     was treated as a local variable (assigned later in the same function)
@@ -146,6 +149,7 @@ def test_on_session_end_does_not_raise(mod, sherpa_home):
 # ---------------------------------------------------------------------------
 # Bug #5: _is_multistep_request detects numbered and bulleted lists.
 # ---------------------------------------------------------------------------
+
 
 def test_is_multistep_numbered_list(mod):
     msg = "1. first thing\n2. second thing\n3. third thing"
@@ -170,6 +174,7 @@ def test_is_multistep_single_sentence_false(mod):
 # Loop detection end-to-end.
 # ---------------------------------------------------------------------------
 
+
 def test_loop_detection_emits_nudge(mod, sherpa_home):
     """Three identical terminal calls should produce exactly one 'loop' nudge."""
     sid = "loop_test"
@@ -190,6 +195,7 @@ def test_loop_detection_emits_nudge(mod, sherpa_home):
 # Argument repair: smart quotes + arg-name aliases.
 # ---------------------------------------------------------------------------
 
+
 def test_repair_args_smart_quotes(mod):
     args = {"command": "ls \u201cfoo\u201d"}
     fixes = mod._repair_args("terminal", args)
@@ -209,6 +215,7 @@ def test_repair_args_aliases(mod):
 # Command lint: $ prompt strip and cd extraction.
 # ---------------------------------------------------------------------------
 
+
 def test_command_lint_strips_dollar_prompt(mod):
     cmd, warnings, fixes = mod._lint_terminal_command("$ ls -la", {})
     assert cmd == "ls -la"
@@ -225,6 +232,7 @@ def test_command_lint_extracts_cd(mod):
 # ---------------------------------------------------------------------------
 # Arg guard: blocks empty required args.
 # ---------------------------------------------------------------------------
+
 
 def test_arg_guard_blocks_empty_command(mod, sherpa_home):
     """terminal(command='') should be blocked."""
@@ -252,6 +260,7 @@ def test_arg_guard_allows_valid_command(mod, sherpa_home):
 # Compound stat key collision safety (Issue #11).
 # ---------------------------------------------------------------------------
 
+
 def test_per_tool_sep_does_not_appear_in_keys(mod):
     """The compound-key separator should be a control character."""
     assert ord(mod._PER_TOOL_SEP) < 0x20
@@ -270,6 +279,7 @@ def test_bump_tool_stat_uses_separator(mod, sherpa_home):
 # ---------------------------------------------------------------------------
 # Fingerprint cycle safety (Issue #10).
 # ---------------------------------------------------------------------------
+
 
 def test_fingerprint_value_handles_cycles(mod):
     """A cyclic dict should not raise RecursionError."""
@@ -292,6 +302,7 @@ def test_fingerprint_value_respects_depth_cap(mod):
 # Plugin version consistency.
 # ---------------------------------------------------------------------------
 
+
 def test_version_is_defined(mod):
     assert hasattr(mod, "__version__")
     assert mod.__version__ == "0.3.1"
@@ -300,6 +311,7 @@ def test_version_is_defined(mod):
 # ---------------------------------------------------------------------------
 # Regression tests for concurrency and timer leak fixes.
 # ---------------------------------------------------------------------------
+
 
 def test_session_start_restarts_cleanup_task(mod, sherpa_home):
     """Starting a session should ensure the cleanup task is running, even if it
@@ -353,6 +365,7 @@ def test_ensure_periodic_flush_does_not_leak_timer_when_no_sessions(mod, sherpa_
 # _transform_tool_result tests.
 # ---------------------------------------------------------------------------
 
+
 def test_transform_tool_result_returns_tip_for_error_string(mod, sherpa_home):
     """An error string should get a [SHERPA] tip appended."""
     result = mod._transform_tool_result(
@@ -398,6 +411,7 @@ def test_transform_tool_result_avoids_double_append(mod, sherpa_home):
 # ---------------------------------------------------------------------------
 # _looks_like_error tests.
 # ---------------------------------------------------------------------------
+
 
 def test_looks_like_error_dict_with_error_key(mod):
     assert mod._looks_like_error({"error": "something failed"}) is True
@@ -448,6 +462,7 @@ def test_looks_like_error_search_files_success(mod):
 # _didyoumean_tool tests.
 # ---------------------------------------------------------------------------
 
+
 def test_didyoumean_tool_returns_none_for_empty(mod, sherpa_home):
     assert mod._didyoumean_tool("") is None
     assert mod._didyoumean_tool(None) is None
@@ -456,6 +471,7 @@ def test_didyoumean_tool_returns_none_for_empty(mod, sherpa_home):
 # ---------------------------------------------------------------------------
 # _didyoumean_path tests (additional).
 # ---------------------------------------------------------------------------
+
 
 def test_didyoumean_path_returns_none_for_existing_path(mod, sherpa_home):
     """If the path exists, _didyoumean_path should return None."""
@@ -484,6 +500,7 @@ def test_didyoumean_path_finds_sibling(mod, sherpa_home):
 # _is_multistep_request additional tests.
 # ---------------------------------------------------------------------------
 
+
 def test_is_multistep_then_next(mod):
     assert mod._is_multistep_request("first do X then do Y finally do Z") is True
 
@@ -503,6 +520,7 @@ def test_is_multistep_long_truncated(mod):
 # ---------------------------------------------------------------------------
 # Loop detection: ping-pong (A-B-A-B) and triple (A-B-C-A-B-C).
 # ---------------------------------------------------------------------------
+
 
 def test_loop_detection_pingpong(mod, sherpa_home):
     """A-B-A-B pattern should be detected as a loop."""
@@ -538,6 +556,7 @@ def test_loop_detection_triple_sequence(mod, sherpa_home):
 # Error streak and hint injection.
 # ---------------------------------------------------------------------------
 
+
 def test_error_streak_triggers_hint_after_two(mod, sherpa_home):
     """After 2 consecutive errors, a matching hint should be queued."""
     sid = "streak_test"
@@ -560,13 +579,17 @@ def test_error_streak_resets_on_success(mod, sherpa_home):
     sid = "reset_streak"
     mod._drain_nudges(sid)
     mod._post_tool_call(
-        tool_name="terminal", args={"command": "fail"},
-        result={"error": "no such file"}, session_id=sid,
+        tool_name="terminal",
+        args={"command": "fail"},
+        result={"error": "no such file"},
+        session_id=sid,
     )
     assert mod._error_streak.get(sid, 0) == 1
     mod._post_tool_call(
-        tool_name="terminal", args={"command": "ok"},
-        result={"exit_code": 0}, session_id=sid,
+        tool_name="terminal",
+        args={"command": "ok"},
+        result={"exit_code": 0},
+        session_id=sid,
     )
     assert mod._error_streak.get(sid, 0) == 0
 
@@ -574,6 +597,7 @@ def test_error_streak_resets_on_success(mod, sherpa_home):
 # ---------------------------------------------------------------------------
 # _redact_dict tests.
 # ---------------------------------------------------------------------------
+
 
 def test_redact_dict_redacts_sensitive_keys(mod):
     data = {"api_key": "secret123", "name": "John", "password": "hunter2"}
@@ -601,6 +625,7 @@ def test_redact_dict_list(mod):
 # _normalize_key tests.
 # ---------------------------------------------------------------------------
 
+
 def test_normalize_key(mod):
     assert mod._normalize_key("file_path") == "filepath"
     assert mod._normalize_key("File-Path") == "filepath"
@@ -610,6 +635,7 @@ def test_normalize_key(mod):
 # ---------------------------------------------------------------------------
 # _deep_merge tests.
 # ---------------------------------------------------------------------------
+
 
 def test_deep_merge_preserves_defaults(mod):
     defaults = {"a": 1, "b": {"c": 2, "d": 3}}
@@ -632,6 +658,7 @@ def test_deep_merge_non_dict_override(mod):
 # ---------------------------------------------------------------------------
 # Command lint: additional tests.
 # ---------------------------------------------------------------------------
+
 
 def test_command_lint_strips_bash_c_simple(mod):
     cmd, warnings, fixes = mod._lint_terminal_command('bash -c "ls -la"', {})
@@ -682,6 +709,7 @@ def test_command_lint_cd_with_existing_workdir(mod):
 # Repair args: additional synonym and schema tests.
 # ---------------------------------------------------------------------------
 
+
 def test_repair_args_no_change_needed(mod):
     args = {"command": "ls", "workdir": "/tmp"}
     fixes = mod._repair_args("terminal", args)
@@ -695,6 +723,7 @@ def test_repair_args_patch_aliases(mod):
     assert "path" in args
     assert "patch" in args
 
+
 def test_repair_args_write_file_aliases(mod):
     args = {"filename": "/f", "text": "content"}
     mod._repair_args("write_file", args)
@@ -705,6 +734,7 @@ def test_repair_args_write_file_aliases(mod):
 # ---------------------------------------------------------------------------
 # Nudge dedup within a single turn.
 # ---------------------------------------------------------------------------
+
 
 def test_nudge_dedup_same_kind_same_turn(mod, sherpa_home):
     """Two nudges of the same kind in the same turn should produce only one."""
@@ -730,6 +760,7 @@ def test_nudge_different_kinds_both_queued(mod, sherpa_home):
 # ---------------------------------------------------------------------------
 # _result_to_text tests.
 # ---------------------------------------------------------------------------
+
 
 def test_result_to_text_none(mod):
     assert mod._result_to_text(None) == ""
@@ -757,6 +788,7 @@ def test_result_to_text_int(mod):
 # ---------------------------------------------------------------------------
 # Session lifecycle.
 # ---------------------------------------------------------------------------
+
 
 def test_session_start_clears_state(mod, sherpa_home):
     """Starting a session should clear any previous per-session state."""
@@ -788,6 +820,7 @@ def test_clear_all_sessions(mod, sherpa_home):
 # _tool_schema_preview tests.
 # ---------------------------------------------------------------------------
 
+
 def test_tool_schema_preview_no_registry(mod, sherpa_home):
     """Without a registry, schema preview should return a fallback."""
     result = mod._tool_schema_preview("nonexistent_tool")
@@ -798,6 +831,7 @@ def test_tool_schema_preview_no_registry(mod, sherpa_home):
 # ---------------------------------------------------------------------------
 # _format_events tests.
 # ---------------------------------------------------------------------------
+
 
 def test_format_events_empty(mod, sherpa_home):
     result = mod._format_events(session_id="no_such_session", n=5)
@@ -815,6 +849,7 @@ def test_format_events_after_recording(mod, sherpa_home):
 # _canonical_read_key_path tests.
 # ---------------------------------------------------------------------------
 
+
 def test_canonical_read_key_path_empty(mod):
     assert mod._canonical_read_key_path("") == ""
     assert mod._canonical_read_key_path(None) is None
@@ -828,6 +863,7 @@ def test_canonical_read_key_path_absolute(mod):
 # ---------------------------------------------------------------------------
 # Plugin version consistency.
 # ---------------------------------------------------------------------------
+
 
 def test_version_matches_plugin_yaml(mod):
     """__version__ in __init__.py should match plugin.yaml."""
@@ -850,6 +886,7 @@ def test_version_matches_plugin_yaml(mod):
 # _didyoumean_path tests (additional).
 # ---------------------------------------------------------------------------
 
+
 def test_didyoumean_path_respects_candidates_limit(mod, sherpa_home, monkeypatch):
     """_didyoumean_path should scan at most _DYM_MAX_CANDIDATES entries, preventing
     latency spikes in directories with thousands of files."""
@@ -867,14 +904,17 @@ def test_didyoumean_path_respects_candidates_limit(mod, sherpa_home, monkeypatch
     class MockScandir:
         def __init__(self, path):
             pass
+
         def __enter__(self):
             return (MockDirEntry(f"file_{i}.txt") for i in range(1000))
+
         def __exit__(self, exc_type, exc_val, exc_tb):
             return False
 
     monkeypatch.setattr("os.scandir", MockScandir)
 
     import difflib
+
     real_gcm = difflib.get_close_matches
     seen_candidate_counts: list[int] = []
 
@@ -896,6 +936,7 @@ def test_didyoumean_path_respects_candidates_limit(mod, sherpa_home, monkeypatch
 # ---------------------------------------------------------------------------
 # Fake plugin context for register/_handle_slash tests.
 # ---------------------------------------------------------------------------
+
 
 class FakePluginCtx:
     """Stand-in for the real plugin context used by `register(ctx)`.
@@ -944,6 +985,7 @@ class FakePluginCtx:
 # ---------------------------------------------------------------------------
 # _pre_llm_call tests.
 # ---------------------------------------------------------------------------
+
 
 def test_pre_llm_call_reanchor_fires_at_cadence(mod, sherpa_home):
     """After _REANCHOR_EVERY tool calls, _pre_llm_call should re-inject the
@@ -1017,6 +1059,7 @@ def test_pre_llm_call_plan_first_injects_on_first_turn(mod, sherpa_home, monkeyp
 
     def fake_has_tool(name):
         return name == "todo"
+
     monkeypatch.setattr(mod, "_has_tool", fake_has_tool)
 
     result = mod._pre_llm_call(
@@ -1082,6 +1125,7 @@ def test_pre_llm_call_truncates_first_user_message(mod, sherpa_home):
 # _handle_slash tests.
 # ---------------------------------------------------------------------------
 
+
 def test_handle_slash_status(mod, sherpa_home):
     """/sherpa status returns the lifetime stats + feature overview."""
     out = mod._handle_slash("status")
@@ -1108,13 +1152,16 @@ def test_handle_slash_feature_alias_tools_on_registers(mod, sherpa_home, monkeyp
     """Toggling `alias_tools` on should register hard aliases via the
     plugin context's `register_tool` method."""
     fake_ctx = FakePluginCtx()
+
     # The real registry import would return None in tests, so _register_aliases
     # would early-return. Patch it to a small stub registry so the loop runs.
     class StubReg:
         def get_all_tool_names(self):
             return []
+
         def get_entry(self, name):
             return None
+
     stub_reg = StubReg()
     monkeypatch.setattr(mod, "_registry", lambda: stub_reg)
     mod._plugin_ctx = fake_ctx
@@ -1132,11 +1179,14 @@ def test_handle_slash_feature_alias_tools_off_unregisters(mod, sherpa_home, monk
     """Toggling `alias_tools` off should unregister previously-installed
     hard aliases."""
     fake_ctx = FakePluginCtx()
+
     class StubReg:
         def get_all_tool_names(self):
             return []
+
         def get_entry(self, name):
             return None
+
     stub_reg = StubReg()
     monkeypatch.setattr(mod, "_registry", lambda: stub_reg)
     mod._plugin_ctx = fake_ctx
@@ -1183,6 +1233,7 @@ def test_handle_slash_reset_clears_state(mod, sherpa_home):
 # _post_tool_call happy path.
 # ---------------------------------------------------------------------------
 
+
 def test_post_tool_call_happy_path_no_nudge(mod, sherpa_home):
     """A successful tool result (no error) must not trigger a nudge nor
     bump the error stats. The only state change is incrementing the
@@ -1212,6 +1263,7 @@ def test_post_tool_call_happy_path_no_nudge(mod, sherpa_home):
 # register(ctx) end-to-end.
 # ---------------------------------------------------------------------------
 
+
 def test_register_hooks_command_and_aliases(mod, sherpa_home, monkeypatch):
     """register(ctx) must install all 6 hooks, register the /sherpa command,
     and (when alias_tools is on) wire up the hard alias tools on ctx."""
@@ -1220,8 +1272,10 @@ def test_register_hooks_command_and_aliases(mod, sherpa_home, monkeypatch):
     class StubReg:
         def get_all_tool_names(self):
             return []
+
         def get_entry(self, name):
             return None
+
     monkeypatch.setattr(mod, "_registry", lambda: StubReg())
 
     # Enable alias_tools before registration so we exercise the alias path.
@@ -1257,5 +1311,3 @@ def test_register_hooks_command_and_aliases(mod, sherpa_home, monkeypatch):
     # Cleanup so the test doesn't leak global state into others.
     mod._plugin_ctx = None
     mod._registered_alias_tool_names.clear()
-
-
