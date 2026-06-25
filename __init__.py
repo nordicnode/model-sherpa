@@ -3242,6 +3242,7 @@ _HELP = textwrap.dedent("""\
       doctor                    Diagnose registry, aliases, state, and logs
       reset                     Clear runtime counters
       log [N]                   Tail the corrections log (default 20)
+      export <json|csv> [path]  Export telemetry events + stats to a file
 """)
 
 
@@ -3339,6 +3340,73 @@ def _doctor_report() -> str:
     if not any([missing_tools, schema_issues, deprecated]) and reg is not None:
         lines.append("  verdict: OK")
     return "\n".join(lines)
+
+
+def _export_telemetry(fmt: str, out_path: Optional[str] = None) -> str:
+    """Export telemetry events and stats to JSON or CSV.
+
+    Args:
+        fmt: "json" or "csv"
+        out_path: Optional file path. Defaults to
+            $HERMES_HOME/memories/model-sherpa/sherpa_export.<fmt>
+    """
+    import csv as _csv
+    import io as _io
+
+    _flush_stats()
+    state = _load_state()
+    stats = state.get("stats") or {}
+
+    # Gather events from all sessions.
+    all_events: List[Dict[str, Any]] = []
+    with _session_lock:
+        for sid, bucket in sorted(_session_events.items()):
+            all_events.extend(list(bucket))
+    if not all_events:
+        # Fall back to disk.
+        all_events = _load_recent_events_from_disk(None, 500)
+
+    # Default output path.
+    if not out_path:
+        state_dir = _state_dir()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        out_path = str(state_dir / f"sherpa_export.{fmt}")
+
+    try:
+        target = Path(out_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        if fmt == "json":
+            payload = {
+                "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "stats": stats,
+                "events": all_events,
+            }
+            target.write_text(json.dumps(payload, indent=2, default=str, ensure_ascii=False))
+            n_events = len(all_events)
+            return f"Exported {n_events} events + stats to {target} (JSON)"
+
+        # CSV — flatten events into rows.
+        if fmt == "csv":
+            # Determine all field names across events.
+            fieldnames: List[str] = ["ts", "session_id", "kind", "detail"]
+            for ev in all_events:
+                for k in ev:
+                    if k not in fieldnames:
+                        fieldnames.append(k)
+            buf = _io.StringIO()
+            writer = _csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for ev in all_events:
+                row = {k: str(v) if not isinstance(v, str) else v for k, v in ev.items()}
+                writer.writerow(row)
+            target.write_text(buf.getvalue())
+            n_events = len(all_events)
+            return f"Exported {n_events} events to {target} (CSV)"
+
+        return f"Unsupported format: {fmt}. Use json or csv."
+    except Exception as e:
+        return f"Export failed: {e}"
 
 
 def _handle_slash(raw: str) -> str:
@@ -3496,6 +3564,21 @@ def _handle_slash(raw: str) -> str:
         except Exception as e:
             return f"(could not read log: {e})"
         return f"Last {len(lines)} correction(s):\n" + "\n".join(lines)
+
+    if sub == "export":
+        # /sherpa export json|csv [path]
+        # Export telemetry events and stats to a file for offline analysis.
+        if len(argv) < 2 or argv[1].lower() not in {"json", "csv"}:
+            return (
+                "Usage: /sherpa export <json|csv> [path]\n\n"
+                "Export telemetry events and stats.\n"
+                "  json  — full structured export (events + stats)\n"
+                "  csv   — events-only flat table\n"
+                "If path is omitted, writes to $HERMES_HOME/memories/model-sherpa/sherpa_export.<fmt>"
+            )
+        fmt = argv[1].lower()
+        out_path = argv[2] if len(argv) > 2 else None
+        return _export_telemetry(fmt, out_path)
 
     return f"Unknown subcommand: {sub}\n\n{_HELP}"
 

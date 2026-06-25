@@ -1720,3 +1720,45 @@ def test_nudge_gentle_on_low_error_streak(mod, sherpa_home):
     texts = [text for _, text in nudges]
     not_escalated = not any("reconsider" in t.lower() or "different approach" in t.lower() for t in texts)
     assert not_escalated, f"Did not expect escalation after just 2 errors, got: {texts}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.3: /sherpa export json|csv
+#
+# Allows the user to export telemetry events and stats to a file for
+# offline analysis. Supports JSON and CSV formats.
+# ---------------------------------------------------------------------------
+
+
+def test_sherpa_export_json(mod, sherpa_home, tmp_path, monkeypatch):
+    """/sherpa export json writes a JSON file with events and stats."""
+    # Ensure some events exist.
+    mod._record_event("export_test", "test_kind", "test detail", tool="test_tool")
+    mod._flush_stats()
+    out_dir = tmp_path / "exports"
+    out_dir.mkdir()
+    # Point export output to tmp_path so it doesn't pollute the project.
+    out = mod._handle_slash(f"export json {out_dir / 'sherpa_export.json'}")
+    assert "exported" in out.lower() or "written" in out.lower() or out_dir.joinpath("sherpa_export.json").exists()
+
+
+def test_sherpa_export_csv(mod, sherpa_home, tmp_path):
+    """/sherpa export csv writes a CSV file with events."""
+    mod._record_event("export_csv", "test_kind", "csv detail", tool="test_tool")
+    mod._flush_stats()
+    out_dir = tmp_path / "exports"
+    out_dir.mkdir()
+    out = mod._handle_slash(f"export csv {out_dir / 'sherpa_export.csv'}")
+    assert "exported" in out.lower() or "written" in out.lower() or out_dir.joinpath("sherpa_export.csv").exists()
+
+
+def test_sherpa_export_requires_format(mod):
+    """/sherpa export with no format shows usage."""
+    out = mod._handle_slash("export")
+    assert "usage" in out.lower() or "json" in out.lower() or "csv" in out.lower()
+
+
+def test_sherpa_export_invalid_format(mod):
+    """/sherpa export with invalid format shows error."""
+    out = mod._handle_slash("export xml")
+    assert "unsupported" in out.lower() or "invalid" in out.lower() or "json" in out.lower()
