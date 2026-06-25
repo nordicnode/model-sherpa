@@ -2511,7 +2511,18 @@ def _post_tool_call_impl(
             if hint:
                 _bump_tool_stat(tool_name, "hints")
                 _record_event(session_id, "hint", hint, tool=tool_name, streak=streak)
-                _queue_nudge(session_id, "hint", f"[SHERPA] {hint}")
+                # Context-aware escalation: same gentle tip every time gets
+                # ignored. When the model keeps making the same mistake,
+                # escalate the nudge language.
+                if streak >= 3:
+                    _queue_nudge(
+                        session_id,
+                        "hint",
+                        f"[SHERPA] You've hit this error {streak} times now. "
+                        f"Reconsider your approach — {hint}",
+                    )
+                else:
+                    _queue_nudge(session_id, "hint", f"[SHERPA] {hint}")
     else:
         with _session_lock:
             _error_streak[sid] = 0

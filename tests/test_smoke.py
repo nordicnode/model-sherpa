@@ -1663,3 +1663,60 @@ def test_transform_tool_result_structured_error_overrides_regex(mod, sherpa_home
     # With status="blocked", it should be treated as an error and get a tip.
     assert out is not None
     assert "[SHERPA]" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.2: Context-aware nudging.
+#
+# When the model repeats the same failing approach, nudges should
+# escalate in urgency. Instead of always delivering the same gentle tip,
+# the nudge text should vary based on the error streak count.
+# ---------------------------------------------------------------------------
+
+
+def test_nudge_escalates_on_high_error_streak(mod, sherpa_home):
+    """After 3+ consecutive errors, the nudge should include stronger
+    language (e.g. 'reconsider', 'different approach') instead of just
+    a gentle tip."""
+    sid = "nudge_escalation"
+    mod._drain_nudges(sid)
+    # Simulate 3 consecutive errors to build up the streak.
+    for i in range(3):
+        mod._error_streak[sid] = mod._error_streak.get(sid, 0) + 1
+    # Now trigger another error via _post_tool_call — streak is 3→4.
+    result = {"exit_code": 1, "stderr": "Permission denied"}
+    mod._post_tool_call(
+        tool_name="terminal",
+        args={"command": "rm -rf /protected"},
+        result=result,
+        session_id=sid,
+    )
+    # The nudge queued for the next turn should be present.
+    with mod._session_lock:
+        nudges = mod._pending_nudges.get(sid, [])
+    assert len(nudges) >= 1, f"Expected at least one nudge after 4 errors, got {nudges}"
+    # At least one nudge should contain escalation language.
+    texts = [text for _, text in nudges]
+    escalated = any("reconsider" in t.lower() or "different approach" in t.lower() for t in texts)
+    assert escalated, f"Expected escalation language in nudges after 4 errors, got: {texts}"
+
+
+def test_nudge_gentle_on_low_error_streak(mod, sherpa_home):
+    """With only 1-2 consecutive errors, the nudge should be gentle (no
+    escalation language)."""
+    sid = "nudge_gentle"
+    mod._drain_nudges(sid)
+    # Simulate just 1 error.
+    mod._error_streak[sid] = 1
+    result = {"exit_code": 1, "stderr": "file not found"}
+    mod._post_tool_call(
+        tool_name="terminal",
+        args={"command": "cat missing.txt"},
+        result=result,
+        session_id=sid,
+    )
+    with mod._session_lock:
+        nudges = mod._pending_nudges.get(sid, [])
+    texts = [text for _, text in nudges]
+    not_escalated = not any("reconsider" in t.lower() or "different approach" in t.lower() for t in texts)
+    assert not_escalated, f"Did not expect escalation after just 2 errors, got: {texts}"
