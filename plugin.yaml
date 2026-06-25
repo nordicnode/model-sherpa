@@ -1,6 +1,6 @@
 name: model-sherpa
 kind: standalone
-version: 0.3.1
+version: 0.4.0
 description: Uniform guide-rails for all models inside Hermes — silent arg repair, tool-name redirects, loop detection, error-pattern hints, and diagnostics.
 author: mikey + Hermes
 hooks:

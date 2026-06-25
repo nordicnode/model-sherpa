@@ -333,7 +333,7 @@ def test_fingerprint_value_respects_depth_cap(mod):
 
 def test_version_is_defined(mod):
     assert hasattr(mod, "__version__")
-    assert mod.__version__ == "0.3.1"
+    assert mod.__version__ == "0.4.0"
 
 
 # ---------------------------------------------------------------------------
@@ -1853,7 +1853,7 @@ def test_extra_args_flagged_in_pre_tool_call(mod, sherpa_home, monkeypatch):
     monkeypatch.setattr(mod, "_tool_registry_generation", lambda: fake_reg._generation)
     _p54_enable(mod, "arg_guard", True)
     args = {"url": "https://example.com", "headers": {"Accept": "text/html"}}
-    result = mod._pre_tool_call(
+    mod._pre_tool_call(
         tool_name="mcp_fetch",
         args=args,
         session_id="extra_arg_test",

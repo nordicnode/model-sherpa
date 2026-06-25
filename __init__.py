@@ -232,7 +232,7 @@ MAX_ERROR_OUTPUT_LENGTH = 8192
 # multi-MB blobs.
 MAX_TOOL_RESULT_LENGTH = 4000
 
-__version__ = "0.3.1"  # keep in sync with plugin.yaml
+__version__ = "0.4.0"  # keep in sync with plugin.yaml
 
 _state_lock = threading.RLock()
 # RLocks so log-rotation (which re-acquires the same lock inside _rotate_file)
@@ -3365,7 +3365,7 @@ def _export_telemetry(fmt: str, out_path: Optional[str] = None) -> str:
     # Gather events from all sessions.
     all_events: List[Dict[str, Any]] = []
     with _session_lock:
-        for sid, bucket in sorted(_session_events.items()):
+        for _sid, bucket in sorted(_session_events.items()):
             all_events.extend(list(bucket))
     if not all_events:
         # Fall back to disk.
