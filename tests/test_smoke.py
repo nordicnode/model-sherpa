@@ -153,7 +153,7 @@ def test_record_event_writes_to_disk_on_first_call(mod, sherpa_home):
     time.sleep(0.1)
     events_path = sherpa_home / "memories" / "model-sherpa" / "events.jsonl"
     assert events_path.exists(), "events.jsonl should be written on first event"
-    lines = events_path.read_text().splitlines()
+    lines = events_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) >= 1
     record = json.loads(lines[-1])
     assert record["kind"] == "test_kind"
@@ -927,7 +927,7 @@ def test_version_matches_plugin_yaml(mod):
         pytest.skip("plugin.yaml not found")
     # Parse version line directly to avoid requiring pyyaml as a test dependency.
     yaml_version = None
-    for line in plugin_yaml_path.read_text().splitlines():
+    for line in plugin_yaml_path.read_text(encoding="utf-8").splitlines():
         if line.startswith("version:"):
             yaml_version = line.split(":", 1)[1].strip()
             break
@@ -1627,7 +1627,7 @@ def test_post_tool_call_structured_error_type_recorded(mod, sherpa_home):
     # Check that the event log has the error_type.
     events_path = sherpa_home / "memories" / "model-sherpa" / "events.jsonl"
     if events_path.exists():
-        lines = events_path.read_text().splitlines()
+        lines = events_path.read_text(encoding="utf-8").splitlines()
         found = any("permission_denied" in line for line in lines)
         assert found, f"error_type should appear in events; got: {lines[-1] if lines else '(empty)'}"
 

@@ -93,7 +93,7 @@ def load_stats() -> tuple:
         try:
             event_stats = dict(_ZERO_STATS)
             per_kind: dict = {}
-            with EVENTS_FILE.open() as f:
+            with EVENTS_FILE.open(encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -109,7 +109,7 @@ def load_stats() -> tuple:
             # Merge in state.json stats for counters that events don't track.
             if STATE_FILE.exists():
                 try:
-                    state = json.loads(STATE_FILE.read_text())
+                    state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
                     state_stats = state.get("stats", {})
                     for k in event_stats:
                         if k not in per_kind and k in state_stats:
@@ -123,7 +123,7 @@ def load_stats() -> tuple:
     # Fall back to state.json.
     if STATE_FILE.exists():
         try:
-            data = json.loads(STATE_FILE.read_text())
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             stats = dict(_ZERO_STATS)
             state_stats = data.get("stats", {})
             for k in stats:
@@ -254,5 +254,5 @@ if __name__ == "__main__":
 
     # Save the report locally
     report_file = Path(__file__).resolve().parent / "benchmark_report.md"
-    report_file.write_text(report_content)
+    report_file.write_text(report_content, encoding="utf-8")
     print(f"\n[OK] Benchmark report saved to: {report_file}")

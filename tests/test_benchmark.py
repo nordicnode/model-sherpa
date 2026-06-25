@@ -71,7 +71,7 @@ def home_with_state(tmp_path):
         },
         "custom_hints": [],
     }
-    (state_dir / "state.json").write_text(json.dumps(state))
+    (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
     return tmp_path
 
 
@@ -102,7 +102,7 @@ def home_with_events(tmp_path):
         },
         "custom_hints": [],
     }
-    (state_dir / "state.json").write_text(json.dumps(state))
+    (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
     events = [
         {"kind": "rewrite", "tool": "terminal", "ts": "2026-06-24T10:00:00"},
         {"kind": "rewrite", "tool": "read_file", "ts": "2026-06-24T10:01:00"},
@@ -110,7 +110,7 @@ def home_with_events(tmp_path):
         {"kind": "loop", "tool": "terminal", "ts": "2026-06-24T10:03:00"},
         {"kind": "read_block", "tool": "read_file", "ts": "2026-06-24T10:04:00"},
     ]
-    with (state_dir / "events.jsonl").open("w") as f:
+    with (state_dir / "events.jsonl").open("w", encoding="utf-8") as f:
         for ev in events:
             f.write(json.dumps(ev) + "\n")
     return tmp_path

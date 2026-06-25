@@ -3389,7 +3389,7 @@ def _export_telemetry(fmt: str, out_path: Optional[str] = None) -> str:
                 "stats": stats,
                 "events": all_events,
             }
-            target.write_text(json.dumps(payload, indent=2, default=str, ensure_ascii=False))
+            target.write_text(json.dumps(payload, indent=2, default=str, ensure_ascii=False), encoding="utf-8")
             n_events = len(all_events)
             return f"Exported {n_events} events + stats to {target} (JSON)"
 
@@ -3407,7 +3407,7 @@ def _export_telemetry(fmt: str, out_path: Optional[str] = None) -> str:
             for ev in all_events:
                 row = {k: str(v) if not isinstance(v, str) else v for k, v in ev.items()}
                 writer.writerow(row)
-            target.write_text(buf.getvalue())
+            target.write_text(buf.getvalue(), encoding="utf-8")
             n_events = len(all_events)
             return f"Exported {n_events} events to {target} (CSV)"
 
