@@ -108,7 +108,9 @@ class FakePluginCtx:
     def register_command(self, name: str, handler=None, description: str = "", args_hint: str = "") -> None:
         self.commands[name] = {"handler": handler, "description": description, "args_hint": args_hint}
 
-    def register_tool(self, name: str, toolset: str = "", schema=None, handler=None, emoji: str = "", **kw: Any) -> None:
+    def register_tool(
+        self, name: str, toolset: str = "", schema=None, handler=None, emoji: str = "", **kw: Any
+    ) -> None:
         self.registered.append({"name": name, "toolset": toolset, "schema": schema, "handler": handler, "emoji": emoji})
 
 

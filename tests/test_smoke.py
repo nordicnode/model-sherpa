@@ -1780,18 +1780,22 @@ def test_extra_arg_detection_for_mcp_tool(mod, sherpa_home, monkeypatch):
     fake_reg = mod.FakeRegistry() if hasattr(mod, "FakeRegistry") else None
     if fake_reg is None:
         from tests.conftest import FakeRegistry
+
         fake_reg = FakeRegistry()
-    fake_reg.register("mcp_web_search", {
-        "name": "mcp_web_search",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer"},
+    fake_reg.register(
+        "mcp_web_search",
+        {
+            "name": "mcp_web_search",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
             },
-            "required": ["query"],
         },
-    })
+    )
     monkeypatch.setattr(mod, "_registry", lambda: fake_reg)
     monkeypatch.setattr(mod, "_tool_registry_generation", lambda: fake_reg._generation)
     # "Query" (wrong case) should repair to "query" (case-insensitive match).
@@ -1810,11 +1814,15 @@ def test_mcp_unknown_tool_dym_nudge(mod, sherpa_home, monkeypatch):
     fake_reg = mod.FakeRegistry() if hasattr(mod, "FakeRegistry") else None
     if fake_reg is None:
         from tests.conftest import FakeRegistry
+
         fake_reg = FakeRegistry()
-    fake_reg.register("mcp_grep", {
-        "name": "mcp_grep",
-        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]},
-    })
+    fake_reg.register(
+        "mcp_grep",
+        {
+            "name": "mcp_grep",
+            "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]},
+        },
+    )
     monkeypatch.setattr(mod, "_registry", lambda: fake_reg)
     monkeypatch.setattr(mod, "_tool_registry_generation", lambda: fake_reg._generation)
     _p54_enable(mod, "didyoumean", True)
@@ -1837,18 +1845,22 @@ def test_extra_args_flagged_in_pre_tool_call(mod, sherpa_home, monkeypatch):
     fake_reg = mod.FakeRegistry() if hasattr(mod, "FakeRegistry") else None
     if fake_reg is None:
         from tests.conftest import FakeRegistry
+
         fake_reg = FakeRegistry()
-    fake_reg.register("mcp_fetch", {
-        "name": "mcp_fetch",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "method": {"type": "string", "enum": ["GET", "POST"]},
+    fake_reg.register(
+        "mcp_fetch",
+        {
+            "name": "mcp_fetch",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "method": {"type": "string", "enum": ["GET", "POST"]},
+                },
+                "required": ["url"],
             },
-            "required": ["url"],
         },
-    })
+    )
     monkeypatch.setattr(mod, "_registry", lambda: fake_reg)
     monkeypatch.setattr(mod, "_tool_registry_generation", lambda: fake_reg._generation)
     _p54_enable(mod, "arg_guard", True)

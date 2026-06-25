@@ -46,14 +46,14 @@ EVENTS_FILE = STATE_DIR / "events.jsonl"
 # ---------------------------------------------------------------------------
 
 BENCHMARK_CONSTANTS: dict = {
-    "AVG_INPUT_TOKEN_COST_PER_M": 0.075,   # $ per million input tokens
-    "AVG_OUTPUT_TOKEN_COST_PER_M": 0.30,    # $ per million output tokens
-    "AVG_LATENCY_PER_TURN_SEC": 2.8,        # seconds per API turn
-    "AVG_FILE_READ_TOKENS": 1500,           # tokens per redundant read blocked
-    "AVG_PROMPT_TOKENS": 4000,              # typical agent prompt size
-    "AVG_COMPLETION_TOKENS": 400,          # typical tool call completion size
-    "CUMULATIVE_CARRYOVER_TURNS": 5,        # avg subsequent turns carrying context
-    "LOOP_SAVES_TURNS": 4,                  # avg turns saved per loop detected
+    "AVG_INPUT_TOKEN_COST_PER_M": 0.075,  # $ per million input tokens
+    "AVG_OUTPUT_TOKEN_COST_PER_M": 0.30,  # $ per million output tokens
+    "AVG_LATENCY_PER_TURN_SEC": 2.8,  # seconds per API turn
+    "AVG_FILE_READ_TOKENS": 1500,  # tokens per redundant read blocked
+    "AVG_PROMPT_TOKENS": 4000,  # typical agent prompt size
+    "AVG_COMPLETION_TOKENS": 400,  # typical tool call completion size
+    "CUMULATIVE_CARRYOVER_TURNS": 5,  # avg subsequent turns carrying context
+    "LOOP_SAVES_TURNS": 4,  # avg turns saved per loop detected
 }
 
 # Zeroed default stats — used only when there is no real data at all.
@@ -161,21 +161,18 @@ def run_benchmark(constants: dict | None = None) -> str:
         + (stats.get("loops", 0) * c["LOOP_SAVES_TURNS"])
     )
 
-    tokens_saved_input = (
-        stats.get("read_blocks", 0) * c["AVG_FILE_READ_TOKENS"]
-    ) + (api_calls_saved * c["AVG_PROMPT_TOKENS"])
-    tokens_saved_output = api_calls_saved * c["AVG_COMPLETION_TOKENS"]
-    cumulative_tokens_saved = (
-        tokens_saved_input * c["CUMULATIVE_CARRYOVER_TURNS"] + tokens_saved_output
+    tokens_saved_input = (stats.get("read_blocks", 0) * c["AVG_FILE_READ_TOKENS"]) + (
+        api_calls_saved * c["AVG_PROMPT_TOKENS"]
     )
+    tokens_saved_output = api_calls_saved * c["AVG_COMPLETION_TOKENS"]
+    cumulative_tokens_saved = tokens_saved_input * c["CUMULATIVE_CARRYOVER_TURNS"] + tokens_saved_output
 
     total_time_saved_sec = api_calls_saved * c["AVG_LATENCY_PER_TURN_SEC"]
     total_time_saved_min = total_time_saved_sec / 60
 
-    financial_savings = (
-        (cumulative_tokens_saved / 1_000_000) * c["AVG_INPUT_TOKEN_COST_PER_M"]
-        + (tokens_saved_output / 1_000_000) * c["AVG_OUTPUT_TOKEN_COST_PER_M"]
-    )
+    financial_savings = (cumulative_tokens_saved / 1_000_000) * c["AVG_INPUT_TOKEN_COST_PER_M"] + (
+        tokens_saved_output / 1_000_000
+    ) * c["AVG_OUTPUT_TOKEN_COST_PER_M"]
 
     monitored_runs = stats.get("cheatsheets", 0) + (10 if not is_real_data else 0)
 
@@ -217,16 +214,16 @@ Based on **{monitored_runs}** monitored agent runs, Model Sherpa has intercepted
 
 | Metric | Count | Description |
 | :--- | :---: | :--- |
-| **Argument Rewrites** | {stats.get('rewrites', 0)} | Silent alias repair (e.g. cmd→command) |
-| **Command Lints** | {stats.get('cmd_lints', 0)} | Shell prompt / cd extraction fixes |
-| **Loop Detections** | {stats.get('loops', 0)} | Repeated-call patterns caught |
-| **Error Hints** | {stats.get('hints', 0)} | Contextual error-pattern hints fired |
-| **Read Damping** | {stats.get('read_blocks', 0)} | Redundant file reads blocked |
-| **Arg Guard Blocks** | {stats.get('arg_blocks', 0)} | Empty/missing required arg blocks |
-| **Did-You-Mean** | {stats.get('didyoumean', 0)} | File-closest-sibling suggestions |
-| **Tool DYM** | {stats.get('tool_dym', 0)} | Closest-registered-tool suggestions |
-| **Re-anchors** | {stats.get('reanchors', 0)} | Original goal reinjected |
-| **Plan Nudges** | {stats.get('plan_nudges', 0)} | Multi-step → todo nudges |
+| **Argument Rewrites** | {stats.get("rewrites", 0)} | Silent alias repair (e.g. cmd→command) |
+| **Command Lints** | {stats.get("cmd_lints", 0)} | Shell prompt / cd extraction fixes |
+| **Loop Detections** | {stats.get("loops", 0)} | Repeated-call patterns caught |
+| **Error Hints** | {stats.get("hints", 0)} | Contextual error-pattern hints fired |
+| **Read Damping** | {stats.get("read_blocks", 0)} | Redundant file reads blocked |
+| **Arg Guard Blocks** | {stats.get("arg_blocks", 0)} | Empty/missing required arg blocks |
+| **Did-You-Mean** | {stats.get("didyoumean", 0)} | File-closest-sibling suggestions |
+| **Tool DYM** | {stats.get("tool_dym", 0)} | Closest-registered-tool suggestions |
+| **Re-anchors** | {stats.get("reanchors", 0)} | Original goal reinjected |
+| **Plan Nudges** | {stats.get("plan_nudges", 0)} | Multi-step → todo nudges |
 
 ---
 

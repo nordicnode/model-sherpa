@@ -178,9 +178,7 @@ def test_missing_required_args_memory_invalid_action(mod_with_registry):
 
 def test_missing_required_args_memory_replace_needs_old_text(mod_with_registry):
     mod, _ = mod_with_registry
-    missing = mod._missing_required_args(
-        "memory", {"action": "replace", "target": "user", "content": "x"}
-    )
+    missing = mod._missing_required_args("memory", {"action": "replace", "target": "user", "content": "x"})
     assert any("old_text" in m for m in missing)
 
 

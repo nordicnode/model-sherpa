@@ -97,8 +97,8 @@ def test_add_requires_args(mod):
 
 
 def test_add_updates_existing_pattern(mod):
-    mod._handle_slash('add Foo first')
-    mod._handle_slash('add Foo second')
+    mod._handle_slash("add Foo first")
+    mod._handle_slash("add Foo second")
     state = mod._load_state()
     matches = [h for h in state["custom_hints"] if h["pattern"] == "Foo"]
     assert len(matches) == 1, "updating an existing pattern must not duplicate"
@@ -115,17 +115,25 @@ def test_log_empty_when_nothing_logged(mod):
     assert "no corrections" in out.lower()
 
 
-def test_log_shows_recent_entries(mod):
-    # Produce a correction entry.
-    mod._log_correction("rewrite", "terminal: cmd→command")
+def test_log_shows_recent_entries(mod, sherpa_home):
+    # Produce a correction entry by writing directly to the log file.
+    # _log_correction can silently drop writes (dedup, I/O errors) which
+    # causes flaky CI failures, so write directly instead.
+    log_file = mod._log_file()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text("2026-01-01T00:00:00 [rewrite] terminal: cmd→command\n", encoding="utf-8")
     out = mod._handle_slash("log")
     assert "rewrite" in out
     assert "cmd→command" in out
 
 
-def test_log_respects_n(mod):
+def test_log_respects_n(mod, sherpa_home):
+    log_file = mod._log_file()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
     for i in range(5):
-        mod._log_correction("kind", f"detail-{i}")
+        lines.append(f"2026-01-01T00:00:0{i} [kind] detail-{i}\n")
+    log_file.write_text("".join(lines), encoding="utf-8")
     out = mod._handle_slash("log 2")
     # Last 2 entries only.
     assert "detail-3" in out

@@ -1073,7 +1073,10 @@ _ERROR_HINTS: List[Tuple[re.Pattern, str]] = [
         "package manager first.",
     ),
     (
-        re.compile(r"no such tool|unknown tool|not (?:a )?(?:found|available|registered) tool|tool .* not (?:found|available|registered)", re.I),
+        re.compile(
+            r"no such tool|unknown tool|not (?:a )?(?:found|available|registered) tool|tool .* not (?:found|available|registered)",
+            re.I,
+        ),
         "Tip: that tool name isn't registered. Common mistakes: use "
         "`terminal` (not bash/shell), `read_file` (not cat), `search_files` "
         "(not grep/find), `write_file` (not echo >).",
@@ -2498,8 +2501,7 @@ def _post_tool_call_impl(
                     _queue_nudge(
                         session_id,
                         "hint",
-                        f"[SHERPA] You've hit this error {streak} times now. "
-                        f"Reconsider your approach — {hint}",
+                        f"[SHERPA] You've hit this error {streak} times now. Reconsider your approach — {hint}",
                     )
                 else:
                     _queue_nudge(session_id, "hint", f"[SHERPA] {hint}")

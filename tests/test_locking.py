@@ -84,8 +84,7 @@ def test_lock_file_mutual_exclusion_with_real_backend(sherpa_home, tmp_path):
         t.join()
 
     assert not overlap_detected.is_set(), (
-        "two threads entered the critical section simultaneously at low contention "
-        "— the lock is effectively a no-op"
+        "two threads entered the critical section simultaneously at low contention — the lock is effectively a no-op"
     )
 
 
@@ -178,4 +177,3 @@ def test_update_state_acquires_lock_exactly_once(monkeypatch, sherpa_home):
     assert lock_calls["count"] == 1, (
         f"_update_state should acquire the state lock exactly once, got {lock_calls['count']}"
     )
-

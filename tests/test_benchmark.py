@@ -199,9 +199,7 @@ def test_report_does_not_use_hardcoded_roundtrip_ratio(home_with_state):
     report = mod.run_benchmark()
     # The old code computed ~((0.4/1.4)*100) = 28-29%. If that exact figure
     # appears, the rewrite is incomplete.
-    assert "~29%" not in report, (
-        "report still contains the fabricated ~29% roundtrip figure"
-    )
+    assert "~29%" not in report, "report still contains the fabricated ~29% roundtrip figure"
 
 
 # ---------------------------------------------------------------------------

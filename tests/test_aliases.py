@@ -69,7 +69,7 @@ def test_build_head_command_defaults_n_and_empty_path(mod):
 
 def test_build_head_command_quotes_paths(mod):
     # A path with a space is shlex-quoted so it survives the shell.
-    assert mod._build_head_command({"path": "/a b/c", "n": 2}) == 'head -n 2 /a b/c' or True
+    assert mod._build_head_command({"path": "/a b/c", "n": 2}) == "head -n 2 /a b/c" or True
     out = mod._build_head_command({"path": "/a b/c", "n": 2})
     assert "/a b/c" in out or "'/a b/c'" in out
 
@@ -97,10 +97,17 @@ def test_build_ls_command_long_and_default(mod):
 
 def _patch_model_tools_unavailable(monkeypatch):
     """Make handle_function_call raise ImportError so _alias_handler falls
-    back to registry.dispatch. The real model_tools module is importable in
-    the test environment but broken (missing yaml), so we must patch the
-    attribute on the already-imported module."""
-    import model_tools
+    back to registry.dispatch. Works whether or not model_tools is installed:
+    - If installed: patch handle_function_call to raise ImportError.
+    - If not installed: the import inside _alias_handler's try block already
+      raises, so no patching needed."""
+    try:
+        import model_tools
+    except ImportError:
+        # model_tools not installed at all (e.g. CI) — _alias_handler's
+        # try/except will catch the ImportError from `from model_tools import
+        # handle_function_call`. Nothing to patch.
+        return
 
     def _boom(*a, **kw):
         raise ImportError("test: handle_function_call unavailable")
@@ -114,9 +121,7 @@ def test_alias_handler_dispatches_via_registry_fallback(mod, fake_registry, monk
     monkeypatch.setattr(mod, "_registry", lambda: fake_registry)
     _patch_model_tools_unavailable(monkeypatch)
     # `cat` -> read_file with arg_map path/path.
-    handler = mod._alias_handler(
-        real_tool="read_file", arg_map={"path": "path", "file": "path", "filename": "path"}
-    )
+    handler = mod._alias_handler(real_tool="read_file", arg_map={"path": "path", "file": "path", "filename": "path"})
     result = handler({"path": "/tmp/x"}, session_id="s1")
     # The handler returns the dispatch result; the real contract is that
     # dispatch was called with the routed args.
