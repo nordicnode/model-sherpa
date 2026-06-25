@@ -15,27 +15,36 @@ To set up a local development environment:
 2. **Dependencies**: Create a virtual environment and install the development dependencies:
    ```bash
    python3 -m venv venv
-   source venv/bin/activate
+   source venv/bin/activate    # on Windows: venv\Scripts\activate
    pip install --upgrade pip
-   pip install pyflakes pytest pytest-asyncio typeguard anyio
+   pip install 'ruff>=0.4' 'mypy>=1.10' 'pytest>=8.0' 'pytest-asyncio>=0.23'
    ```
+   (These match the `dev` extra in `pyproject.toml`: `pip install -e '.[dev]'`.)
 
 ## Development Workflow
 
 We use a simple `Makefile` to enforce code quality and correctness:
 
-* **Linting**: We use `pyflakes` to check for syntax errors, undefined names, and unused variables.
+* **Linting**: We use `ruff` to check for syntax errors, undefined names, unused variables, and import sorting.
   ```bash
-  make lint
-  ```
+   make lint
+   ```
+* **Formatting**: `ruff format` auto-fixes formatting.
+  ```bash
+   make format
+   ```
+* **Type Checking**: We use `mypy` (the typecheck target copies `__init__.py` into a hyphen-free temp dir because the repo path contains a space).
+  ```bash
+   make typecheck
+   ```
 * **Testing**: We use `pytest` for unit and regression testing.
   ```bash
-  make test
-  ```
-* **Pre-commit Check**: Runs both the linter and tests in order. Ensure this passes before opening a pull request:
+   make test
+   ```
+* **Pre-commit Check**: Runs lint, typecheck, and tests in order. Ensure this passes before opening a pull request:
   ```bash
-  make check
-  ```
+   make check
+   ```
 
 ## Submitting Pull Requests
 

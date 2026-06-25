@@ -32,8 +32,10 @@ Features (each toggleable via /sherpa feature <name> <on|off>):
   schema_on_demand  When arg_guard fires, append the tool's parameter list
                     so models can re-emit a correct call next turn.
 
-  read_damper       Block the 4th read of the same file in one turn — the
-                    content is already in context above.
+  read_damper       Range-aware redundant-read block: if a read_file call's
+                    requested line range is a subset of a range already read
+                    this turn, block it (the content is already in context
+                    above). Sequential paging (1-100 then 101-200) is allowed.
 
   didyoumean        On read_file ENOENT, scan the parent directory and
                     propose the closest sibling filename via difflib.
@@ -264,7 +266,7 @@ _DEFAULT_STATE: Dict[str, Any] = {
         "plan_first": True,  # multi-step prompts → nudge to use `todo`
         "arg_guard": True,  # block empty/bogus required args
         "schema_on_demand": True,  # tool-arg validation failure → show schema
-        "read_damper": True,  # block 4th read of same path in one turn
+        "read_damper": True,  # block reads whose range is a subset of an already-read range
         "command_lint": True,  # repair common terminal command mistakes
     },
     "stats": {

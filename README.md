@@ -31,18 +31,13 @@ git clone https://github.com/nordicnode/model-sherpa.git ~/.hermes/plugins/model
 
 ## Performance and Efficiency Benchmarks
 
-Model Sherpa has been benchmarked using **real historical data** from actual agent sessions. Below are the cumulative savings and performance gains measured directly from the plugin's telemetry:
-
-* **LLM API Calls Prevented**: **44 calls** (errors silently repaired).
-* **Cumulative Context Saved**: **980,100 tokens** (redundant payloads blocked).
-* **Developer Latency Saved**: **123.2 seconds** (prevented wait time for API retries).
-* **Efficiency Increase**: **~30% fewer roundtrips** to goal on average.
-
-You can generate a local benchmark report based on your own usage statistics at any time by running:
+Model Sherpa records every silent repair, block, and nudge it applies in `state.json` and `events.jsonl`. You can project those recorded counts into estimated token / latency / cost savings with the bundled benchmark tool:
 
 ```bash
 make benchmark
 ```
+
+The report multiplies your real recorded counts by configurable per-incident estimates (token sizes, turn latency) defined in the `BENCHMARK_CONSTANTS` dict inside `benchmark.py`. **When no local session data exists yet, the report is generated from all-zero defaults and clearly flags this** with a `⚠ NO REAL DATA` banner rather than presenting fabricated numbers. Adjust the multipliers in `BENCHMARK_CONSTANTS` to match your model's real token costs.
 
 ---
 
@@ -81,7 +76,7 @@ Traditional dampers block the same file twice. Sherpa's **Read Damper** is range
 ### Zero-Trust Telemetry
 Sherpa is built for privacy-conscious environments:
 - **Substring Redaction**: Masks `api_key`, `token`, `password`, and `secret` in all logs, even if they are part of a larger key (e.g., `github_token_v2`).
-- **Binary Safeguards**: Automatically summarizes non-UTF8 data (`<binary data: 1.2MB>`) to prevent context window pollution.
+- **Binary Safeguards**: Coerces non-UTF8 tool results to a compact placeholder (`<binary data: N bytes>`) so binary payloads don't pollute the context window.
 
 ---
 
@@ -116,9 +111,9 @@ You can extend Sherpa's recovery logic via the `custom_hints` array in `state.js
 ---
 
 ## Engineering and Performance
-- **Atomic Transactions**: Uses `fcntl` cross-process locking and atomic `replace()` to ensure state integrity across multiple Hermes instances.
-- **Minimal Latency**: Implements multi-level caching for disk stats and regex patterns. Post-tool hooks are benchmarked to add < 1ms of overhead.
-- **Startup Stability**: Uses non-blocking locks to ensure the CLI never hangs, even if the state file is contested.
+- **Cross-Platform Atomic Transactions**: Uses `fcntl` (Unix) or `msvcrt` (Windows) cross-process locking plus atomic `replace()` to keep state consistent across concurrent Hermes instances. (When neither backend is available, locking fails open rather than ever blocking the CLI.)
+- **Minimal Latency**: Multi-level caching for state and regex patterns, plus a single-lock `_update_state` path (no double/triple flock), keeps per-turn overhead negligible on the hot path.
+- **Startup Stability**: Non-blocking locks with a bounded retry budget ensure the CLI never hangs, even when the state file is contested.
 
 ---
 
