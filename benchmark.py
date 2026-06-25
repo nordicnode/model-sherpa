@@ -11,6 +11,7 @@ fabricating numbers from hardcoded defaults.
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Path resolution — mirrors __init__.py's lazy HERMES_HOME logic.
@@ -139,7 +140,7 @@ def load_stats() -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def run_benchmark(constants: dict | None = None) -> str:
+def run_benchmark(constants: Optional[dict] = None) -> str:
     """Generate the benchmark report.
 
     Args:

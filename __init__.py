@@ -460,7 +460,7 @@ def _load_state(bypass_temporal_block: bool = False, bypass_lock: bool = False) 
                 return copy.deepcopy(merged)
 
             try:
-                data = json.loads(_state_file().read_text())
+                data = json.loads(_state_file().read_text(encoding="utf-8"))
             except Exception:
                 merged = copy.deepcopy(_DEFAULT_STATE)
                 _state_cache = merged
@@ -516,7 +516,7 @@ def _save_state(state: Dict[str, Any], already_locked: bool = False) -> None:
             if already_locked:
                 # Caller already holds LOCK_EX (e.g. _update_state); skip
                 # re-acquiring so there is no double-flock latency.
-                with tmp.open("w") as f:
+                with tmp.open("w", encoding="utf-8") as f:
                     json.dump(state, f, indent=2, sort_keys=True)
                     f.flush()
                     try:
@@ -526,7 +526,7 @@ def _save_state(state: Dict[str, Any], already_locked: bool = False) -> None:
                 tmp.replace(state_file)
             else:
                 with _lock_state_file(fcntl.LOCK_EX if fcntl else 0):
-                    with tmp.open("w") as f:
+                    with tmp.open("w", encoding="utf-8") as f:
                         json.dump(state, f, indent=2, sort_keys=True)
                         f.flush()
                         try:
@@ -603,7 +603,7 @@ def _migrate_state() -> None:
     if not state_file.exists():
         return
     try:
-        data = json.loads(state_file.read_text())
+        data = json.loads(state_file.read_text(encoding="utf-8"))
     except Exception:
         return
     if not isinstance(data, dict) or "profile" not in data:
@@ -627,7 +627,7 @@ def _log_correction(kind: str, detail: str) -> None:
             if (now - _last_correction_rotation) > 10.0:
                 _rotate_file(log_file)
                 _last_correction_rotation = now
-            with log_file.open("a") as f:
+            with log_file.open("a", encoding="utf-8") as f:
                 f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{kind}] {detail}\n")
             _last_log_entry = (kind, detail, now)
         except Exception as exc:
@@ -1492,7 +1492,7 @@ def _record_event(session_id: str, kind: str, detail: str, **fields: Any) -> Non
             if (now - _last_event_rotation) > 10.0:
                 _rotate_file(event_log_file, lock=_event_rotate_lock)
                 _last_event_rotation = now
-        with _event_log_lock, event_log_file.open("a") as f:
+        with _event_log_lock, event_log_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
     except Exception as exc:
         # Issue #16 improvement: log swallowed exceptions so a silent failure
@@ -1505,7 +1505,7 @@ def _load_recent_events_from_disk(session_id: Optional[str], n: int) -> List[Dic
     if not event_log_file.exists():
         return []
     try:
-        lines = event_log_file.read_text().splitlines()[-max(n * 5, n) :]
+        lines = event_log_file.read_text(encoding="utf-8").splitlines()[-max(n * 5, n) :]
     except Exception:
         return []
     events: List[Dict[str, Any]] = []
@@ -3303,7 +3303,7 @@ def _doctor_report() -> str:
     log_file = _log_file()
     if log_file.exists():
         try:
-            lines = log_file.read_text().splitlines()
+            lines = log_file.read_text(encoding="utf-8").splitlines()
             log_lines = len(lines)
             if lines:
                 last_log = lines[-1]
@@ -3314,7 +3314,7 @@ def _doctor_report() -> str:
     state_file = _state_file()
     try:
         if state_file.exists():
-            raw = json.loads(state_file.read_text())
+            raw = json.loads(state_file.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 raw_state_keys = sorted(raw.keys())
     except Exception:
@@ -3567,7 +3567,7 @@ def _handle_slash(raw: str) -> str:
         if not log_file.exists():
             return "(no corrections logged yet)"
         try:
-            lines = log_file.read_text().splitlines()[-n:]
+            lines = log_file.read_text(encoding="utf-8").splitlines()[-n:]
         except Exception as e:
             return f"(could not read log: {e})"
         return f"Last {len(lines)} correction(s):\n" + "\n".join(lines)
