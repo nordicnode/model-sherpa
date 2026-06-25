@@ -229,12 +229,21 @@ def _lock_file(lock_path: Path = LOCK_FILE, mode: int = 0):
     Uses LOCK_NB with a retry loop so a contested lock does not block the CLI
     indefinitely, but still prevents race conditions by attempting to acquire
     the lock multiple times before failing open.
+
+    The STATE_DIR is created *before* the fcntl early-return so that state
+    persistence works on every platform — previously the only mkdir() lived
+    after the ``fcntl is None`` branch, so on Windows (and any platform where
+    fcntl is unavailable) the state directory was never created and every
+    _save_state() / _record_event() write failed with FileNotFoundError.
     """
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.debug("model-sherpa: could not create state dir %s: %s", STATE_DIR, exc)
     if fcntl is None:
         yield
         return
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+") as f:
             acquired = False
             for _ in range(10):
@@ -1740,10 +1749,20 @@ def _lint_terminal_command(command: str, args: Dict[str, Any]) -> Tuple[str, Lis
         if not m:
             break
         cd_path = m.group(1).strip()
+        # Strip surrounding quotes via shlex, but on Windows keep backslashes
+        # literal: shlex with posix=True (the default) treats `\` as an escape
+        # char and strips it, corrupting paths like C:\Users\me\sub into
+        # C:Usersmesub (which then fails is_absolute() and gets wrongly
+        # appended to the existing workdir). posix=False preserves backslashes.
         try:
-            parts = shlex.split(cd_path)
+            parts = shlex.split(cd_path, posix=False)
             if len(parts) == 1:
-                cd_path = parts[0]
+                # shlex with posix=False leaves surrounding quotes in place
+                # for an un-split token; strip a single matched pair.
+                tok = parts[0]
+                if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0]:
+                    tok = tok[1:-1]
+                cd_path = tok
         except Exception:
             pass
 

@@ -66,9 +66,19 @@ def test_lock_state_file_uses_lock_file_constant(mod, sherpa_home):
 
 def test_lock_state_file_acquires_and_releases(mod, sherpa_home):
     """The context manager should not raise; the lock file should exist
-    after the with-block returns."""
+    after the with-block returns on platforms with a real locking backend.
+
+    On platforms where fcntl is unavailable the lock is a fail-open no-op
+    that does not create the lock file; that gap is closed separately by
+    the msvcrt backend (see test_locking.py).
+    """
     with mod._lock_state_file(2):  # LOCK_EX
         pass
+    if mod.fcntl is None:
+        # Fail-open no-op path: directory exists (created unconditionally),
+        # but the lock file itself is only materialised by a real backend.
+        assert mod.STATE_DIR.exists()
+        return
     assert mod.LOCK_FILE.exists(), "lock file should be created on first use"
 
 
@@ -698,11 +708,35 @@ def test_command_lint_no_op(mod):
     assert warnings == []
 
 
-def test_command_lint_cd_with_existing_workdir(mod):
-    args = {"workdir": "/home"}
-    cmd, warnings, fixes = mod._lint_terminal_command("cd /tmp && ls", args)
+def test_command_lint_cd_with_existing_workdir(mod, tmp_path):
+    # Use a real absolute dir so the test is portable across platforms
+    # (POSIX "/tmp" does not resolve to a real path on win32).
+    target = tmp_path / "sub"
+    target.mkdir()
+    args = {"workdir": str(tmp_path / "other")}
+    cmd, warnings, fixes = mod._lint_terminal_command(f"cd {target} && ls", args)
     assert cmd == "ls"
-    assert args["workdir"] == "/tmp"
+    # An absolute cd path overrides the existing workdir.
+    assert Path(args["workdir"]).resolve() == target.resolve()
+
+
+def test_command_lint_cd_windows_backslash_path_overrides_workdir(mod, tmp_path):
+    """Regression: on Windows a `cd C:\\dir\\sub && cmd` must override the
+    existing workdir with the absolute path. shlex.split() used to strip the
+    backslashes (POSIX escape semantics), producing a mangled relative path
+    that got appended to the old workdir."""
+    target = tmp_path / "deep" / "sub"
+    target.mkdir(parents=True)
+    # Force the OS-native separator (backslash on Windows) the way a model
+    # would after seeing a Windows path in the environment.
+    sep = "\\" if sys.platform == "win32" else "/"
+    native = str(target).replace("\\", sep).replace("/", sep)
+    args = {"workdir": str(tmp_path / "unrelated")}
+    cmd, warnings, fixes = mod._lint_terminal_command(f"cd {native} && ls", args)
+    assert cmd == "ls"
+    assert Path(args["workdir"]).resolve() == target.resolve(), (
+        f"absolute cd path should override workdir; got {args['workdir']!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -855,9 +889,12 @@ def test_canonical_read_key_path_empty(mod):
     assert mod._canonical_read_key_path(None) is None
 
 
-def test_canonical_read_key_path_absolute(mod):
-    result = mod._canonical_read_key_path("/tmp/test.py")
-    assert result == "/tmp/test.py"
+def test_canonical_read_key_path_absolute(mod, tmp_path):
+    # A real absolute path is returned resolved (not a POSIX-specific literal).
+    f = tmp_path / "test.py"
+    f.write_text("x")
+    result = mod._canonical_read_key_path(str(f))
+    assert Path(result).resolve() == f.resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -1311,3 +1348,46 @@ def test_register_hooks_command_and_aliases(mod, sherpa_home, monkeypatch):
     # Cleanup so the test doesn't leak global state into others.
     mod._plugin_ctx = None
     mod._registered_alias_tool_names.clear()
+
+
+# ---------------------------------------------------------------------------
+# Windows baseline: state-dir creation must not depend on fcntl.
+#
+# Root cause found while establishing the test baseline on win32: _lock_file
+# returns early when fcntl is None (Unix-only), and the only STATE_DIR.mkdir
+# call lived *after* that early return. On Windows (or any platform where
+# fcntl is unavailable) the state directory was never created, so every
+# _save_state() failed with FileNotFoundError. These tests pin the contract
+# that state persistence works regardless of the locking backend.
+# ---------------------------------------------------------------------------
+
+
+def test_save_state_creates_missing_state_dir(mod, sherpa_home):
+    """_save_state must create STATE_DIR and succeed even when it does not
+    yet exist — independent of the locking backend (fcntl/msvcrt/none)."""
+    state_dir = mod.STATE_DIR
+    assert not state_dir.exists(), "precondition: STATE_DIR should not exist yet"
+    # _save_state must not raise and must persist to disk.
+    mod._save_state({"enabled": True, "features": {}, "stats": {}, "custom_hints": []})
+    assert state_dir.exists(), "STATE_DIR should have been created"
+    assert mod.STATE_FILE.exists(), "state.json should have been written"
+
+
+def test_record_event_creates_missing_state_dir(mod, sherpa_home):
+    """_record_event (events.jsonl) must also work without a pre-existing
+    STATE_DIR — it has its own mkdir but shares the same backend gap."""
+    assert not mod.STATE_DIR.exists()
+    mod._record_event("t", "event_kind", "detail")
+    assert mod.EVENT_LOG_FILE.exists(), "events.jsonl should have been written"
+
+
+def test_lock_state_file_creates_missing_state_dir(mod, sherpa_home):
+    """Acquiring the state lock must not fail when STATE_DIR is absent.
+
+    On platforms where fcntl is unavailable the lock is a no-op, but the
+    directory it targets must still be created so later writes succeed.
+    """
+    assert not mod.STATE_DIR.exists()
+    with mod._lock_state_file(2):  # LOCK_EX
+        pass
+    assert mod.STATE_DIR.exists(), "STATE_DIR should exist after acquiring lock"
