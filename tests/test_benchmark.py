@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Fixture: load the benchmark module fresh.
 # ---------------------------------------------------------------------------
@@ -181,6 +180,9 @@ def test_benchmark_constants_overridable(home_with_state):
     original = mod.BENCHMARK_CONSTANTS.copy()
     mod.BENCHMARK_CONSTANTS["AVG_INPUT_TOKEN_COST_PER_M"] = 999.0
     report = mod.run_benchmark()
+    # The overridden constant must actually be consumed by run_benchmark
+    # (not just stored) — the report must still be a string and not raise.
+    assert isinstance(report, str) and report
     # Restore so the fixture cleanup doesn't contaminate other tests.
     mod.BENCHMARK_CONSTANTS.update(original)
 
