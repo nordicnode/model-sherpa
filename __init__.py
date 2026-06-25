@@ -2817,14 +2817,21 @@ def _alias_handler(
                     real_args.setdefault(k, v)
         _bump_tool_stat(real_tool, "aliases_used")
         _log_correction("alias", f"alias→{real_tool} args={list(real_args.keys())}")
-        # Import the dispatcher first; only fall back when it is *unavailable*
-        # (e.g. unit tests with a stub registry). If the real dispatch itself
-        # raises after partial side-effects, retrying via reg.dispatch would
-        # double-execute terminal/write tools — so dispatch errors must
-        # propagate, not trigger the fallback.
+        # Try the real dispatcher first. When it is unavailable (e.g. unit
+        # tests with a stub registry) or raises at runtime (e.g. a broken
+        # model_tools install), fall back to registry.dispatch.
         try:
             from model_tools import handle_function_call
-        except ImportError as exc:
+
+            return handle_function_call(
+                real_tool,
+                real_args,
+                task_id=kw.get("task_id"),
+                tool_call_id=kw.get("tool_call_id"),
+                session_id=kw.get("session_id"),
+                user_task=kw.get("user_task"),
+            )
+        except Exception as exc:
             logger.debug(
                 "model-sherpa: handle_function_call unavailable for alias %s (%s); falling back to registry.dispatch",
                 real_tool,
@@ -2847,14 +2854,6 @@ def _alias_handler(
                 task_id=kw.get("task_id"),
                 user_task=kw.get("user_task"),
             )
-        return handle_function_call(
-            real_tool,
-            real_args,
-            task_id=kw.get("task_id"),
-            tool_call_id=kw.get("tool_call_id"),
-            session_id=kw.get("session_id"),
-            user_task=kw.get("user_task"),
-        )
 
     return handler
 

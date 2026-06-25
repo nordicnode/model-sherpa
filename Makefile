@@ -39,12 +39,12 @@ typecheck:
 	mypy $(PLUGIN)
 
 test:
-	python3 -m pytest $(TESTS) -v
+	python -m pytest $(TESTS) -v
 
 check: lint typecheck test
 
 benchmark:
-	python3 benchmark.py
+	python benchmark.py
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +

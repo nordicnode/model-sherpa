@@ -21,11 +21,13 @@ jobs:
     - name: Install ruff
       run: pip install 'ruff>=0.4'
 
+    # benchmark.py is shipped and is the source of public claims, so it is
+    # linted alongside the plugin and the test suite.
     - name: Ruff check
-      run: ruff check __init__.py tests/
+      run: ruff check __init__.py benchmark.py tests/
 
     - name: Ruff format check
-      run: ruff format --check __init__.py tests/
+      run: ruff format --check __init__.py benchmark.py tests/
 
   typecheck:
     name: Type Check
@@ -42,20 +44,25 @@ jobs:
       run: pip install 'mypy>=1.10'
 
     - name: Run mypy
-      # mypy can't infer package from __init__.py when the dir has a hyphen.
-      # Copy to a temp dir with a valid name and check there.
+      # mypy can't infer a package from __init__.py when the repo dir contains
+      # a space ("model sherpa"). Copy the source into a hyphen-free temp dir
+      # with a valid package name and check there.
       run: |
         mkdir -p /tmp/mypy-check/model_sherpa
         cp __init__.py /tmp/mypy-check/model_sherpa/
         mypy --ignore-missing-imports /tmp/mypy-check/model_sherpa/__init__.py
 
   test:
-    name: Tests
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.os }} / Python ${{ matrix.python-version }})
     strategy:
+      fail-fast: false
       matrix:
+        # Windows is a first-class target: the plugin uses msvcrt locking and
+        # path handling that only executes on win32. Linux covers the fcntl path.
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
 
@@ -68,4 +75,6 @@ jobs:
       run: pip install pytest pytest-asyncio
 
     - name: Run tests
-      run: make test
+      # Invoke pytest via `python -m` directly (not `make test`) so the job
+      # works identically on Windows where `python3` resolves to a Store stub.
+      run: python -m pytest tests/ -v
