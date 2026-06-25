@@ -25,3 +25,14 @@ corrections.log
 *.1.jsonl
 *.1.log
 *.bak
+
+# Test/tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Benchmark output (regenerated, never committed)
+benchmark_report.md
+
+# Pytest temp files from export tests
+UsersMikeyAppDataLocalTemppytest*
