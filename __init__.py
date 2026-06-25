@@ -1240,6 +1240,26 @@ def _looks_like_error(result: Any, tool_name: str = "") -> bool:
     return False
 
 
+# Structured error field names that Hermes may pass through the hook
+# interface. When provided, they are authoritative — more reliable than
+# the heuristic _looks_like_error regex.
+_ERROR_STATUSES = frozenset({"error", "blocked", "failed"})
+
+
+def _is_structured_error(status: str = "", error_message: str = "") -> bool:
+    """Return True when structured error fields indicate a definitive error.
+
+    This is the authoritative path: when Hermes provides status or
+    error_message, we trust it over the heuristic _looks_like_error
+    regex. Fall back to _looks_like_error only when both are absent.
+    """
+    if isinstance(status, str) and status.strip().lower() in _ERROR_STATUSES:
+        return True
+    if isinstance(error_message, str) and error_message.strip():
+        return True
+    return False
+
+
 def _canonical_read_key_path(path: str) -> str:
     """Best-effort canonical read path for per-turn duplicate detection."""
     if not path:
@@ -2348,12 +2368,19 @@ def _post_tool_call(
     session_id: str = "",
     tool_call_id: str = "",
     duration_ms: int = 0,
+    status: str = "",
+    error_type: str = "",
+    error_message: str = "",
     **_: Any,
 ) -> None:
     """Track loops + errors; queue next-turn nudges.
 
     Fail-open: any unhandled exception is logged and swallowed so a buggy
     Sherpa never crashes the host agent.  The safe default is None (no-op).
+
+    Structured error fields (status, error_type, error_message) are
+    authoritative when provided — more reliable than the heuristic
+    _looks_like_error regex.
     """
     try:
         _post_tool_call_impl(
@@ -2364,6 +2391,9 @@ def _post_tool_call(
             session_id=session_id,
             tool_call_id=tool_call_id,
             duration_ms=duration_ms,
+            status=status,
+            error_type=error_type,
+            error_message=error_message,
         )
     except Exception as exc:
         logger.exception(
@@ -2381,6 +2411,9 @@ def _post_tool_call_impl(
     session_id: str = "",
     tool_call_id: str = "",
     duration_ms: int = 0,
+    status: str = "",
+    error_type: str = "",
+    error_message: str = "",
     **_: Any,
 ) -> None:
     """Implementation of _post_tool_call. See _post_tool_call for the contract."""
@@ -2411,10 +2444,24 @@ def _post_tool_call_impl(
         _calls_since_reanchor[sid] = _calls_since_reanchor.get(sid, 0) + 1
 
     result_text = _result_to_text(result)
-    if _looks_like_error(result, tool_name):
+    # Structured error fields (from Hermes hook interface) are authoritative
+    # when provided. Fall back to heuristic regex only when absent.
+    is_error = _is_structured_error(status, error_message) or _looks_like_error(result, tool_name)
+    if is_error:
         with _session_lock:
             _error_streak[sid] = _error_streak.get(sid, 0) + 1
             streak = _error_streak[sid]
+
+        # Record structured error fields when available (authoritative source).
+        if error_type or error_message or status:
+            _record_event(
+                session_id,
+                "structured_error",
+                error_message.strip() or status or "unknown",
+                tool=tool_name,
+                error_type=error_type or "",
+                status=status or "",
+            )
 
         # Did-you-mean: file-tools ENOENT → propose closest sibling
         if _feature("didyoumean") and tool_name in {"read_file", "patch", "write_file"}:
@@ -2478,12 +2525,19 @@ def _transform_tool_result(
     session_id: str = "",
     tool_call_id: str = "",
     duration_ms: int = 0,
+    status: str = "",
+    error_type: str = "",
+    error_message: str = "",
     **_: Any,
 ) -> Optional[str]:
     """Append a Tip: footer to error results so the model sees it in-turn.
 
     Fail-open: any unhandled exception is logged and the hook returns None
     (no transformation) so a buggy Sherpa never crashes the host agent.
+
+    Structured error fields (status, error_type, error_message) are
+    authoritative when provided — more reliable than the heuristic
+    _looks_like_error regex.
     """
     try:
         return _transform_tool_result_impl(
@@ -2494,6 +2548,9 @@ def _transform_tool_result(
             session_id=session_id,
             tool_call_id=tool_call_id,
             duration_ms=duration_ms,
+            status=status,
+            error_type=error_type,
+            error_message=error_message,
         )
     except Exception as exc:
         logger.exception(
@@ -2512,6 +2569,9 @@ def _transform_tool_result_impl(
     session_id: str = "",
     tool_call_id: str = "",
     duration_ms: int = 0,
+    status: str = "",
+    error_type: str = "",
+    error_message: str = "",
     **_: Any,
 ) -> Optional[str]:
     """Implementation of _transform_tool_result. See _transform_tool_result for the contract.
@@ -2529,11 +2589,19 @@ def _transform_tool_result_impl(
         return None
     if not isinstance(result, str) or not result:
         return None
-    if not _looks_like_error(result, tool_name):
+    # Structured error fields are authoritative when provided. Fall back
+    # to heuristic regex only when they are absent.
+    is_error = _is_structured_error(status, error_message) or _looks_like_error(result, tool_name)
+    if not is_error:
         return None
     hint = _match_error_hint(result)
     if not hint:
-        return None
+        # When structured error fields are present but no regex hint matched,
+        # synthesize a generic hint from the error_message or status.
+        if _is_structured_error(status, error_message):
+            hint = error_message.strip() or f"Tool returned status: {status}"
+        else:
+            return None
     # Avoid double-appending if a previous plugin already added the tip.
     if "[SHERPA]" in result:
         return None

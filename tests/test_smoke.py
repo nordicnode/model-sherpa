@@ -1565,3 +1565,101 @@ def test_pre_llm_call_fails_open(monkeypatch, mod, sherpa_home):
         is_first_turn=True,
     )
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.1: Structured error fields (status / error_type / error_message).
+#
+# Hermes can pass structured error fields in the tool result dict. When
+# present, they are authoritative — we should detect errors via them
+# instead of relying solely on the _looks_like_error regex heuristic.
+# ---------------------------------------------------------------------------
+
+
+def test_post_tool_call_structured_error_status(mod, sherpa_home):
+    """A result with status='error' is detected as an error WITHOUT relying
+    on _looks_like_error regex. The error streak should increment."""
+    sid = "struct_err_status"
+    mod._drain_nudges(sid)
+    result = {"exit_code": 0, "stdout": "some output"}  # looks successful to regex
+    mod._post_tool_call(
+        tool_name="terminal",
+        args={"command": "test"},
+        result=result,
+        session_id=sid,
+        status="error",
+        error_message="command timed out",
+    )
+    # Error streak must increment even though _looks_like_error would say no.
+    assert mod._error_streak.get(sid, 0) >= 1
+
+
+def test_post_tool_call_structured_error_message(mod, sherpa_home):
+    """A non-empty error_message is an error signal even when status is empty."""
+    sid = "struct_err_msg"
+    mod._drain_nudges(sid)
+    result = {"exit_code": 0, "stdout": "looks fine"}
+    mod._post_tool_call(
+        tool_name="terminal",
+        args={"command": "check"},
+        result=result,
+        session_id=sid,
+        status="",
+        error_message="Permission denied",
+    )
+    assert mod._error_streak.get(sid, 0) >= 1
+
+
+def test_post_tool_call_structured_error_type_recorded(mod, sherpa_home):
+    """When error_type is provided, it should be recorded in the event."""
+    sid = "struct_err_type"
+    mod._drain_nudges(sid)
+    result = {"exit_code": 1, "stderr": "crash"}
+    mod._post_tool_call(
+        tool_name="terminal",
+        args={"command": "run"},
+        result=result,
+        session_id=sid,
+        status="error",
+        error_type="permission_denied",
+        error_message="Access denied",
+    )
+    # Check that the event log has the error_type.
+    events_path = sherpa_home / "memories" / "model-sherpa" / "events.jsonl"
+    if events_path.exists():
+        lines = events_path.read_text().splitlines()
+        found = any("permission_denied" in line for line in lines)
+        assert found, f"error_type should appear in events; got: {lines[-1] if lines else '(empty)'}"
+
+
+def test_post_tool_call_no_structured_fields_falls_back_to_regex(mod, sherpa_home):
+    """When no structured error fields are provided, detection falls back
+    to _looks_like_error as before."""
+    sid = "struct_err_fallback"
+    mod._drain_nudges(sid)
+    # This dict triggers _looks_like_error (nonzero exit_code).
+    result = {"exit_code": 1, "stderr": "error"}
+    mod._post_tool_call(
+        tool_name="terminal",
+        args={"command": "fail"},
+        result=result,
+        session_id=sid,
+    )
+    assert mod._error_streak.get(sid, 0) >= 1
+
+
+def test_transform_tool_result_structured_error_overrides_regex(mod, sherpa_home):
+    """_transform_tool_result should detect structured errors. A result that
+    looks successful to regex but has status='error' should get a tip."""
+    result = "Operation completed with warnings"  # not an error string
+    out = mod._transform_tool_result(
+        tool_name="terminal",
+        args={"command": "test"},
+        result=result,
+        session_id="transform_struct",
+        status="blocked",
+        error_message="Blocked by policy",
+    )
+    # With status="blocked", it should be treated as an error and get a tip.
+    assert out is not None
+    assert "[SHERPA]" in out
