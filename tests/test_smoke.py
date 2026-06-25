@@ -21,6 +21,7 @@ import importlib.util
 import json
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,23 @@ import pytest
 # ---------------------------------------------------------------------------
 # Fixture: load the plugin fresh against a temporary HERMES_HOME.
 # ---------------------------------------------------------------------------
+
+
+def _load_fresh_module(hermes_home: str | None = None):
+    """Reload the plugin module from source. Optional HERMES_HOME sets the
+    env before reload (mirrors the `mod` fixture but as a callable helper)."""
+    if hermes_home is not None:
+        import os
+
+        os.environ["HERMES_HOME"] = str(hermes_home)
+    for name in list(sys.modules):
+        if name in ("model_sherpa", "model-sherpa") or name.startswith("model_sherpa."):
+            del sys.modules[name]
+    plugin_path = Path(__file__).resolve().parent.parent / "__init__.py"
+    spec = importlib.util.spec_from_file_location("model_sherpa", str(plugin_path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture()
@@ -1391,3 +1409,99 @@ def test_lock_state_file_creates_missing_state_dir(mod, sherpa_home):
     with mod._lock_state_file(2):  # LOCK_EX
         pass
     assert mod.STATE_DIR.exists(), "STATE_DIR should exist after acquiring lock"
+
+
+# ---------------------------------------------------------------------------
+# HERMES_HOME resolution (Phase 1).
+#
+# The plugin must resolve its state dir through Hermes' get_hermes_home() so
+# that (a) the Windows platform default is %LOCALAPPDATA%\hermes rather than
+# ~/.hermes, and (b) the context-local override used by kanban/delegation
+# subagents is honored. Previously the plugin read os.environ at import time
+# and bypassed both, silently writing state to the wrong profile.
+# ---------------------------------------------------------------------------
+
+
+def test_hermes_home_delegates_to_get_hermes_home_when_available(monkeypatch, tmp_path):
+    """When hermes_constants.get_hermes_home is importable, _hermes_home()
+    must defer to it so the context-local override path is honored."""
+    fake_home = tmp_path / "via_get_hermes_home"
+    fake_home.mkdir()
+    stub = types.ModuleType("hermes_constants")
+    stub.get_hermes_home = lambda: fake_home  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_constants", stub)
+    mod = _load_fresh_module()
+    assert Path(mod._hermes_home()) == fake_home
+
+
+def test_hermes_home_context_local_override_is_honored(monkeypatch, tmp_path):
+    """get_hermes_home() reflects a context-local override (used by subagents);
+    _hermes_home must pick it up on every call, not a cached import-time value."""
+    override_home = tmp_path / "subagent_profile"
+    override_home.mkdir()
+    stub = types.ModuleType("hermes_constants")
+    stub.get_hermes_home = lambda: override_home  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_constants", stub)
+    mod = _load_fresh_module()
+    # Must resolve per-call, so the value tracks a later change to the override.
+    assert Path(mod._hermes_home()) == override_home
+    new_override = tmp_path / "other_profile"
+    new_override.mkdir()
+    stub.get_hermes_home = lambda: new_override  # type: ignore[attr-defined]
+    assert Path(mod._hermes_home()) == new_override, "must re-read per call"
+
+
+def test_hermes_home_fallback_without_hermes_libs(monkeypatch, tmp_path):
+    """When hermes_constants is unavailable (e.g. unit tests / standalone run),
+    fall back to the HERMES_HOME env var, not crash."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    # Ensure hermes_constants is not importable.
+    sys.modules.pop("hermes_constants", None)
+    import importlib
+
+    real_import = importlib.import_module
+
+    def _block(name, *a, **k):
+        if name == "hermes_constants":
+            raise ImportError("simulated absence")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(importlib, "import_module", _block)
+    mod = _load_fresh_module()
+    assert Path(mod._hermes_home()) == tmp_path
+
+
+def test_hermes_home_windows_platform_default(monkeypatch, tmp_path):
+    """On win32 with no HERMES_HOME env var and no Hermes libs, the default
+    must be %LOCALAPPDATA%/hermes — NOT ~/.hermes (the POSIX default)."""
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    local = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    sys.modules.pop("hermes_constants", None)
+    import importlib
+
+    real_import = importlib.import_module
+
+    def _block(name, *a, **k):
+        if name == "hermes_constants":
+            raise ImportError("simulated absence")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(importlib, "import_module", _block)
+    mod = _load_fresh_module()
+    expected = local / "hermes"
+    assert Path(mod._hermes_home()) == expected, (
+        f"win32 default should be %LOCALAPPDATA%/hermes, got {mod._hermes_home()}"
+    )
+
+
+def test_state_dir_resolves_lazily_through_hermes_home(monkeypatch, tmp_path):
+    """STATE_DIR/STATE_FILE/etc. must resolve through _hermes_home() so they
+    track the active profile rather than a frozen import-time constant."""
+    stub = types.ModuleType("hermes_constants")
+    stub.get_hermes_home = lambda: tmp_path  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_constants", stub)
+    mod = _load_fresh_module()
+    assert Path(mod._state_dir()) == tmp_path / "memories" / "model-sherpa"
+    assert Path(mod._state_file()) == tmp_path / "memories" / "model-sherpa" / "state.json"

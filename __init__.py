@@ -106,6 +106,7 @@ import logging
 import os
 import re
 import shlex
+import sys
 import textwrap
 import threading
 import time
@@ -118,13 +119,97 @@ logger = logging.getLogger("model-sherpa")
 # ---------------------------------------------------------------------------
 # Paths & persistence
 # ---------------------------------------------------------------------------
+#
+# The Hermes home directory is resolved *lazily and per-call* through
+# hermes_constants.get_hermes_home() (when the Hermes libs are importable) so
+# that:
+#   - the platform-native default is honored on Windows (%LOCALAPPDATA%\hermes
+#     rather than ~/.hermes), and
+#   - the context-local home override (set_hermes_home_override, used by kanban
+#     workers and delegation subagents to scope to a non-default profile) is
+#     picked up on every read/write.
+#
+# Previously these were module-level constants computed once at import from
+# os.environ["HERMES_HOME"], which bypassed get_hermes_home() entirely and
+# silently routed every subagent to the same global state file (a real
+# cross-profile data-corruption risk on multi-profile installs).
+#
+# The path names below (HERMES_HOME, STATE_DIR, ...) are still exposed as
+# module attributes for backwards compatibility with the tests and the
+# /sherpa doctor report, but they are resolved on each access via module
+# __getattr__ (PEP 562) so they always reflect the active profile.
 
-HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
-STATE_DIR = HERMES_HOME / "memories" / "model-sherpa"
-STATE_FILE = STATE_DIR / "state.json"
-LOCK_FILE = STATE_DIR / "state.lock"  # fcntl flock target (Bug #1 fix)
-LOG_FILE = STATE_DIR / "corrections.log"
-EVENT_LOG_FILE = STATE_DIR / "events.jsonl"
+
+def _platform_default_home() -> Path:
+    """Mirror hermes_constants._get_platform_default_hermes_home()."""
+    if sys.platform == "win32":
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        return base / "hermes"
+    return Path.home() / ".hermes"
+
+
+def _hermes_home() -> Path:
+    """Resolve the Hermes home directory, deferring to Hermes' source of truth.
+
+    Tries hermes_constants.get_hermes_home() (honors context-local override +
+    platform default); falls back to the HERMES_HOME env var, then the platform
+    default, when Hermes libs are unavailable (e.g. standalone unit tests).
+    """
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+
+        return Path(get_hermes_home())
+    except Exception:
+        val = os.environ.get("HERMES_HOME", "").strip()
+        if val:
+            return Path(val)
+        return _platform_default_home()
+
+
+def _state_dir() -> Path:
+    return _hermes_home() / "memories" / "model-sherpa"
+
+
+def _state_file() -> Path:
+    return _state_dir() / "state.json"
+
+
+def _lock_file_path() -> Path:
+    return _state_dir() / "state.lock"  # flock/locking target (Bug #1 fix)
+
+
+def _log_file() -> Path:
+    return _state_dir() / "corrections.log"
+
+
+def _event_log_file() -> Path:
+    return _state_dir() / "events.jsonl"
+
+
+# Backwards-compatible module attributes. The tests and the /sherpa doctor
+# report read these as ``mod.STATE_FILE`` etc. PEP 562 __getattr__ resolves
+# them on access so they reflect the active profile. (In-module references use
+# the explicit _xxx() resolvers, since bare global LOAD does not consult
+# __getattr__.)
+_LAZY_PATHS = {
+    "HERMES_HOME": _hermes_home,
+    "STATE_DIR": _state_dir,
+    "STATE_FILE": _state_file,
+    "LOCK_FILE": _lock_file_path,
+    "LOG_FILE": _log_file,
+    "EVENT_LOG_FILE": _event_log_file,
+}
+
+
+def __getattr__(name: str) -> Any:
+    # PEP 562: expose the path constants as module attributes that resolve
+    # lazily so they track the active Hermes profile.
+    resolver = _LAZY_PATHS.get(name)
+    if resolver is not None:
+        return resolver()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # ---------------------------------------------------------------------------
 # Tuning constants
@@ -218,13 +303,16 @@ def _deep_merge(defaults: Any, override: Any) -> Any:
 
 
 @contextlib.contextmanager
-def _lock_file(lock_path: Path = LOCK_FILE, mode: int = 0):
+def _lock_file(lock_path: Optional[Path] = None, mode: int = 0):
     """Acquire a cross-process lock on a specific file path.
 
     Defaults to LOCK_FILE (the state-file lock) so existing call-sites that
     only need to serialize state.json access can call ``_lock_file(mode=...)``
     without specifying a path. Pass an explicit ``lock_path`` for other files
-    (e.g. log rotation targets).
+    (e.g. log rotation targets). The default is resolved lazily on each call
+    (rather than as a default-argument, which is bound once at def-time and
+    would freeze the path against an import-time profile) so the lock always
+    targets the active Hermes profile.
 
     Uses LOCK_NB with a retry loop so a contested lock does not block the CLI
     indefinitely, but still prevents race conditions by attempting to acquire
@@ -236,10 +324,13 @@ def _lock_file(lock_path: Path = LOCK_FILE, mode: int = 0):
     fcntl is unavailable) the state directory was never created and every
     _save_state() / _record_event() write failed with FileNotFoundError.
     """
+    if lock_path is None:
+        lock_path = _lock_file_path()
+    state_dir = _state_dir()
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        state_dir.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
-        logger.debug("model-sherpa: could not create state dir %s: %s", STATE_DIR, exc)
+        logger.debug("model-sherpa: could not create state dir %s: %s", state_dir, exc)
     if fcntl is None:
         yield
         return
@@ -267,11 +358,11 @@ def _lock_file(lock_path: Path = LOCK_FILE, mode: int = 0):
 def _lock_state_file(mode: int):
     """Acquire a cross-process lock on state.lock (LOCK_SH or LOCK_EX).
 
-    Thin shim over :func:`_lock_file` that defaults to ``LOCK_FILE``.
+    Thin shim over :func:`_lock_file` that targets the state lock.
     Retained for backward compatibility with call-sites that pre-date the
     consolidation.
     """
-    with _lock_file(LOCK_FILE, mode):
+    with _lock_file(_lock_file_path(), mode):
         yield
 
 
@@ -290,7 +381,7 @@ def _load_state(bypass_temporal_block: bool = False) -> Dict[str, Any]:
         # ensures callers can mutate freely (and then _save_state) without
         # corrupting the cache for everyone else.
         try:
-            st = STATE_FILE.stat()
+            st = _state_file().stat()
             # Include inode to catch atomic replaces even if mtime/size don't change.
             sig: Optional[Tuple[float, int, int]] = (st.st_mtime, st.st_size, getattr(st, "st_ino", 0))
         except FileNotFoundError:
@@ -309,7 +400,7 @@ def _load_state(bypass_temporal_block: bool = False) -> Dict[str, Any]:
                 return copy.deepcopy(merged)
 
             try:
-                data = json.loads(STATE_FILE.read_text())
+                data = json.loads(_state_file().read_text())
             except Exception:
                 merged = copy.deepcopy(_DEFAULT_STATE)
                 _state_cache = merged
@@ -350,9 +441,10 @@ def _feature(name: str) -> bool:
 def _save_state(state: Dict[str, Any]) -> None:
     global _state_cache, _state_cache_sig
     with _state_lock:
+        state_file = _state_file()
         # Update the persisted file using an atomic replace to avoid
         # corruption during power failure or crash.
-        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp = state_file.with_suffix(".tmp")
         try:
             with _lock_state_file(fcntl.LOCK_EX if fcntl else 0):
                 with tmp.open("w") as f:
@@ -362,7 +454,7 @@ def _save_state(state: Dict[str, Any]) -> None:
                         os.fsync(f.fileno())
                     except OSError:
                         pass
-                tmp.replace(STATE_FILE)
+                tmp.replace(state_file)
         finally:
             # Cleanup: on the success path tmp.replace() already moved the file,
             # so tmp.exists() is False. This only fires on failure (e.g. disk full,
@@ -375,7 +467,7 @@ def _save_state(state: Dict[str, Any]) -> None:
         # Refresh the in-memory cache so subsequent _load_state() calls
         # immediately see the new values without re-reading the file.
         try:
-            st = STATE_FILE.stat()
+            st = state_file.stat()
             _state_cache = copy.deepcopy(state)
             _state_cache_sig = (st.st_mtime, st.st_size, getattr(st, "st_ino", 0))
         except Exception:
@@ -428,10 +520,11 @@ def _rotate_file(
 
 def _migrate_state() -> None:
     """Apply one-way cleanup for deprecated persisted keys."""
-    if not STATE_FILE.exists():
+    state_file = _state_file()
+    if not state_file.exists():
         return
     try:
-        data = json.loads(STATE_FILE.read_text())
+        data = json.loads(state_file.read_text())
     except Exception:
         return
     if not isinstance(data, dict) or "profile" not in data:
@@ -450,11 +543,12 @@ def _log_correction(kind: str, detail: str) -> None:
             if last_kind == kind and last_detail == detail and (now - last_time) < 30:
                 return
         try:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _state_dir().mkdir(parents=True, exist_ok=True)
+            log_file = _log_file()
             if (now - _last_correction_rotation) > 10.0:
-                _rotate_file(LOG_FILE)
+                _rotate_file(log_file)
                 _last_correction_rotation = now
-            with LOG_FILE.open("a") as f:
+            with log_file.open("a") as f:
                 f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{kind}] {detail}\n")
             _last_log_entry = (kind, detail, now)
         except Exception as exc:
@@ -1285,7 +1379,8 @@ def _record_event(session_id: str, kind: str, detail: str, **fields: Any) -> Non
         bucket.append(event)
         _global_events.append(event)
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _state_dir().mkdir(parents=True, exist_ok=True)
+        event_log_file = _event_log_file()
         # Issue #8 fix: rotation runs under a per-file lock, not the shared
         # correction-log lock, so writes to events.jsonl don't block on
         # corrections.log rotations (and vice versa).
@@ -1293,9 +1388,9 @@ def _record_event(session_id: str, kind: str, detail: str, **fields: Any) -> Non
             global _last_event_rotation
             now = time.time()
             if (now - _last_event_rotation) > 10.0:
-                _rotate_file(EVENT_LOG_FILE, lock=_event_rotate_lock)
+                _rotate_file(event_log_file, lock=_event_rotate_lock)
                 _last_event_rotation = now
-        with _event_log_lock, EVENT_LOG_FILE.open("a") as f:
+        with _event_log_lock, event_log_file.open("a") as f:
             f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
     except Exception as exc:
         # Issue #16 improvement: log swallowed exceptions so a silent failure
@@ -1304,10 +1399,11 @@ def _record_event(session_id: str, kind: str, detail: str, **fields: Any) -> Non
 
 
 def _load_recent_events_from_disk(session_id: Optional[str], n: int) -> List[Dict[str, Any]]:
-    if not EVENT_LOG_FILE.exists():
+    event_log_file = _event_log_file()
+    if not event_log_file.exists():
         return []
     try:
-        lines = EVENT_LOG_FILE.read_text().splitlines()[-max(n * 5, n) :]
+        lines = event_log_file.read_text().splitlines()[-max(n * 5, n) :]
     except Exception:
         return []
     events: List[Dict[str, Any]] = []
@@ -2939,9 +3035,10 @@ def _doctor_report() -> str:
     session_count = len(_all_session_ids())
     log_lines = 0
     last_log = "(none)"
-    if LOG_FILE.exists():
+    log_file = _log_file()
+    if log_file.exists():
         try:
-            lines = LOG_FILE.read_text().splitlines()
+            lines = log_file.read_text().splitlines()
             log_lines = len(lines)
             if lines:
                 last_log = lines[-1]
@@ -2949,9 +3046,10 @@ def _doctor_report() -> str:
             last_log = f"(could not read: {exc})"
 
     raw_state_keys: List[str] = []
+    state_file = _state_file()
     try:
-        if STATE_FILE.exists():
-            raw = json.loads(STATE_FILE.read_text())
+        if state_file.exists():
+            raw = json.loads(state_file.read_text())
             if isinstance(raw, dict):
                 raw_state_keys = sorted(raw.keys())
     except Exception:
@@ -2961,7 +3059,7 @@ def _doctor_report() -> str:
     lines = [
         "**model-sherpa doctor**",
         f"  enabled: {state.get('enabled')}",
-        f"  state: {STATE_FILE}",
+        f"  state: {state_file}",
         f"  registry: {'available' if reg is not None else 'unavailable'}",
         f"  registry generation: {_tool_registry_generation()}",
         f"  registered tools visible: {len(names)}",
@@ -3133,10 +3231,11 @@ def _handle_slash(raw: str) -> str:
         n = 20
         if len(argv) > 1 and argv[1].isdigit():
             n = max(1, min(int(argv[1]), 500))
-        if not LOG_FILE.exists():
+        log_file = _log_file()
+        if not log_file.exists():
             return "(no corrections logged yet)"
         try:
-            lines = LOG_FILE.read_text().splitlines()[-n:]
+            lines = log_file.read_text().splitlines()[-n:]
         except Exception as e:
             return f"(could not read log: {e})"
         return f"Last {len(lines)} correction(s):\n" + "\n".join(lines)
@@ -3217,7 +3316,7 @@ def register(ctx) -> None:
     global _plugin_ctx
     _plugin_ctx = ctx
     # Ensure state dir exists at first load.
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _state_dir().mkdir(parents=True, exist_ok=True)
     _migrate_state()
 
     ctx.register_hook("pre_tool_call", _pre_tool_call)
@@ -3243,4 +3342,4 @@ def register(ctx) -> None:
     # Session cleanup safety net
     _ensure_cleanup_task()
 
-    logger.info("model-sherpa loaded (state=%s, %d aliases registered)", STATE_FILE, n_aliases)
+    logger.info("model-sherpa loaded (state=%s, %d aliases registered)", _state_file(), n_aliases)
