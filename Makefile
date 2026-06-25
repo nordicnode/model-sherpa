@@ -10,6 +10,7 @@
 #   make clean     — remove cached .pyc / __pycache__ / .pytest_cache
 
 PLUGIN := __init__.py
+BENCHMARK := benchmark.py
 TESTS  := tests/
 
 .PHONY: lint format typecheck test check benchmark clean
@@ -20,7 +21,7 @@ lint:
 		echo "  pip install 'ruff>=0.4'"; \
 		exit 2; \
 	}
-	ruff check $(PLUGIN) $(TESTS)
+	ruff check $(PLUGIN) $(BENCHMARK) $(TESTS)
 
 format:
 	@command -v ruff >/dev/null 2>&1 || { \
@@ -28,7 +29,7 @@ format:
 		echo "  pip install 'ruff>=0.4'"; \
 		exit 2; \
 	}
-	ruff format $(PLUGIN) $(TESTS)
+	ruff format $(PLUGIN) $(BENCHMARK) $(TESTS)
 
 typecheck:
 	@command -v mypy >/dev/null 2>&1 || { \
