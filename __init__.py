@@ -99,6 +99,10 @@ try:
     import fcntl
 except ImportError:
     fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt  # Windows-only: provides locking() for cross-process locks
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 import functools
 import hashlib
 import json
@@ -331,27 +335,70 @@ def _lock_file(lock_path: Optional[Path] = None, mode: int = 0):
         state_dir.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         logger.debug("model-sherpa: could not create state dir %s: %s", state_dir, exc)
-    if fcntl is None:
+
+    # Fail-open when no cross-process backend is available at all (single-
+    # process safety only). We still yield so callers proceed.
+    if fcntl is None and msvcrt is None:
         yield
         return
-    try:
-        with lock_path.open("a+") as f:
-            acquired = False
-            for _ in range(10):
-                try:
-                    fcntl.flock(f, mode | fcntl.LOCK_NB)
-                    acquired = True
-                    break
-                except OSError:
-                    time.sleep(0.01)
-            if not acquired:
-                logger.debug(
-                    "model-sherpa: lock acquisition on %s failed after retries, proceeding without lock", lock_path
-                )
+
+    # fcntl path (Unix).
+    if fcntl is not None:
+        try:
+            with lock_path.open("a+") as f:
+                acquired = False
+                for _ in range(10):
+                    try:
+                        fcntl.flock(f, mode | fcntl.LOCK_NB)
+                        acquired = True
+                        break
+                    except OSError:
+                        time.sleep(0.01)
+                if not acquired:
+                    logger.debug(
+                        "model-sherpa: lock acquisition on %s failed after retries, proceeding without lock", lock_path
+                    )
+                yield
+        except Exception as exc:
+            logger.debug("model-sherpa: cross-process lock on %s unavailable: %s", lock_path, exc)
             yield
+        return
+
+    # msvcrt path (Windows). msvcrt.locking locks a byte range on the fd and
+    # must be explicitly released with LK_UNLCK (unlike flock, which releases
+    # on close). LK_NBLCK is the non-blocking exclusive lock attempt.
+    f = None
+    acquired = False
+    try:
+        f = lock_path.open("a+")
+        f.seek(0)
+        for _ in range(10):
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
+                break
+            except OSError:
+                time.sleep(0.01)
+        if not acquired:
+            logger.debug(
+                "model-sherpa: lock acquisition on %s failed after retries, proceeding without lock", lock_path
+            )
+        yield
     except Exception as exc:
         logger.debug("model-sherpa: cross-process lock on %s unavailable: %s", lock_path, exc)
         yield
+    finally:
+        if acquired and f is not None:
+            try:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        if f is not None:
+            try:
+                f.close()
+            except Exception:
+                pass
 
 
 @contextlib.contextmanager
@@ -366,7 +413,7 @@ def _lock_state_file(mode: int):
         yield
 
 
-def _load_state(bypass_temporal_block: bool = False) -> Dict[str, Any]:
+def _load_state(bypass_temporal_block: bool = False, bypass_lock: bool = False) -> Dict[str, Any]:
     global _state_cache, _state_cache_sig, _last_stat_time
     with _state_lock:
         now = time.time()
@@ -392,7 +439,18 @@ def _load_state(bypass_temporal_block: bool = False) -> Dict[str, Any]:
         if _state_cache is not None and sig == _state_cache_sig:
             return copy.deepcopy(_state_cache)
 
-        with _lock_state_file(fcntl.LOCK_SH if fcntl else 0):
+        @contextlib.contextmanager
+        def _maybe_lock():
+            # bypass_lock is set only by _update_state, which already holds
+            # LOCK_EX on the state file — re-acquiring LOCK_SH here would
+            # contend (and on a busy lock, fail-open after ~100ms of retries).
+            if bypass_lock:
+                yield
+            else:
+                with _lock_state_file(fcntl.LOCK_SH if fcntl else 0):
+                    yield
+
+        with _maybe_lock():
             if sig is None:
                 merged = copy.deepcopy(_DEFAULT_STATE)
                 _state_cache = merged
@@ -420,13 +478,20 @@ def _load_state(bypass_temporal_block: bool = False) -> Dict[str, Any]:
 
 
 def _update_state(func: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
-    """Atomically load, modify, and save state with both thread and process locking."""
+    """Atomically load, modify, and save state with both thread and process locking.
+
+    Acquires the cross-process lock exactly *once* (LOCK_EX) so there is no
+    double-flock latency and no risk of a fail-open read between the lock and
+    the save.  Both _load_state and _save_state are called with bypass/already-
+    locked flags so they skip re-acquiring the lock this caller already holds.
+    """
     with _state_lock, _lock_state_file(fcntl.LOCK_EX if fcntl else 0):
         # We bypass the temporal block to ensure we see the absolute latest
-        # on-disk state before applying the mutation.
-        state = _load_state(bypass_temporal_block=True)
+        # on-disk state before applying the mutation.  We also bypass the
+        # cross-process lock because _update_state already holds LOCK_EX.
+        state = _load_state(bypass_temporal_block=True, bypass_lock=True)
         func(state)
-        _save_state(state)
+        _save_state(state, already_locked=True)
         return state
 
 
@@ -438,7 +503,7 @@ def _feature(name: str) -> bool:
     return bool((s.get("features") or {}).get(name, False))
 
 
-def _save_state(state: Dict[str, Any]) -> None:
+def _save_state(state: Dict[str, Any], already_locked: bool = False) -> None:
     global _state_cache, _state_cache_sig
     with _state_lock:
         state_file = _state_file()
@@ -446,7 +511,9 @@ def _save_state(state: Dict[str, Any]) -> None:
         # corruption during power failure or crash.
         tmp = state_file.with_suffix(".tmp")
         try:
-            with _lock_state_file(fcntl.LOCK_EX if fcntl else 0):
+            if already_locked:
+                # Caller already holds LOCK_EX (e.g. _update_state); skip
+                # re-acquiring so there is no double-flock latency.
                 with tmp.open("w") as f:
                     json.dump(state, f, indent=2, sort_keys=True)
                     f.flush()
@@ -455,6 +522,16 @@ def _save_state(state: Dict[str, Any]) -> None:
                     except OSError:
                         pass
                 tmp.replace(state_file)
+            else:
+                with _lock_state_file(fcntl.LOCK_EX if fcntl else 0):
+                    with tmp.open("w") as f:
+                        json.dump(state, f, indent=2, sort_keys=True)
+                        f.flush()
+                        try:
+                            os.fsync(f.fileno())
+                        except OSError:
+                            pass
+                    tmp.replace(state_file)
         finally:
             # Cleanup: on the success path tmp.replace() already moved the file,
             # so tmp.exists() is False. This only fires on failure (e.g. disk full,
