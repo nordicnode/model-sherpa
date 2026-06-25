@@ -36,3 +36,6 @@ benchmark_report.md
 
 # Pytest temp files from export tests
 UsersMikeyAppDataLocalTemppytest*
+
+# Removed MCP server config dirs
+.code-review-graph/

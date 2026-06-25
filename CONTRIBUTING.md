@@ -8,7 +8,7 @@ To set up a local development environment:
 
 1. **Fork and Clone**: Fork the repository on GitHub and clone it locally:
    ```bash
-   git clone https://github.com/YOUR-USERNAME/model-sherpa.git
+   git clone https://github.com/nordicnode/model-sherpa.git
    cd model-sherpa
    ```
 
@@ -25,26 +25,26 @@ To set up a local development environment:
 
 We use a simple `Makefile` to enforce code quality and correctness:
 
-* **Linting**: We use `ruff` to check for syntax errors, undefined names, unused variables, and import sorting.
+- **Linting**: We use `ruff` to check for syntax errors, undefined names, unused variables, and import sorting.
   ```bash
-   make lint
-   ```
-* **Formatting**: `ruff format` auto-fixes formatting.
+  make lint
+  ```
+- **Formatting**: `ruff format` auto-fixes formatting.
   ```bash
-   make format
-   ```
-* **Type Checking**: We use `mypy` (the typecheck target copies `__init__.py` into a hyphen-free temp dir because the repo path contains a space).
+  make format
+  ```
+- **Type Checking**: We use `mypy` (the typecheck target copies `__init__.py` into a hyphen-free temp dir because the repo path contains a space).
   ```bash
-   make typecheck
-   ```
-* **Testing**: We use `pytest` for unit and regression testing.
+  make typecheck
+  ```
+- **Testing**: We use `pytest` for unit and regression testing.
   ```bash
-   make test
-   ```
-* **Pre-commit Check**: Runs lint, typecheck, and tests in order. Ensure this passes before opening a pull request:
+  make test
+  ```
+- **Pre-commit Check**: Runs lint, typecheck, and tests in order. Ensure this passes before opening a pull request:
   ```bash
-   make check
-   ```
+  make check
+  ```
 
 ## Submitting Pull Requests
 
@@ -58,6 +58,6 @@ We use a simple `Makefile` to enforce code quality and correctness:
 
 ## Code Style & Design Rules
 
-* **Safety First**: Any modifications to critical hooks must fail-open (swallow exceptions gracefully) so they do not crash the host Hermes Agent.
-* **No Thread Leaks**: Ensure background tasks/timers inspect active session counts and do not reschedule themselves when no sessions remain.
-* **Cross-Process Safety**: All reads and writes to shared state (`state.json`, `corrections.log`, etc.) must be protected via the cross-process lock `_lock_file` to support parallel agent execution.
+- **Safety First**: Any modifications to critical hooks must fail-open (swallow exceptions gracefully) so they do not crash the host Hermes Agent.
+- **No Thread Leaks**: Ensure background tasks/timers inspect active session counts and do not reschedule themselves when no sessions remain.
+- **Cross-Process Safety**: All reads and writes to shared state (`state.json`, `corrections.log`, etc.) must be protected via the cross-process lock `_lock_file` to support parallel agent execution.
