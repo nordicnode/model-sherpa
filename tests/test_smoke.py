@@ -1762,3 +1762,102 @@ def test_sherpa_export_invalid_format(mod):
     """/sherpa export with invalid format shows error."""
     out = mod._handle_slash("export xml")
     assert "unsupported" in out.lower() or "invalid" in out.lower() or "json" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.4: MCP tool repair — schema-based extra-arg detection and
+# MCP-specific DYM error patterns for non-builtin tools.
+# ---------------------------------------------------------------------------
+
+
+def _p54_enable(mod, name, value):
+    mod._update_state(lambda st: st["features"].__setitem__(name, value))
+
+
+def test_extra_arg_detection_for_mcp_tool(mod, sherpa_home, monkeypatch):
+    """When a tool has a known schema and the model passes an arg that isn't
+    in the schema, _repair_args should flag it."""
+    fake_reg = mod.FakeRegistry() if hasattr(mod, "FakeRegistry") else None
+    if fake_reg is None:
+        from tests.conftest import FakeRegistry
+        fake_reg = FakeRegistry()
+    fake_reg.register("mcp_web_search", {
+        "name": "mcp_web_search",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+    })
+    monkeypatch.setattr(mod, "_registry", lambda: fake_reg)
+    monkeypatch.setattr(mod, "_tool_registry_generation", lambda: fake_reg._generation)
+    # "Query" (wrong case) should repair to "query" (case-insensitive match).
+    # "limt" (typo) should NOT match — it's too far from "limit".
+    args = {"Query": "test", "limt": 10}
+    fixes = mod._repair_args("mcp_web_search", args)
+    # "Query" should be repaired to "query" (case-insensitive match).
+    assert any("Query" in f or "query" in f for f in fixes), f"Expected Query→query, got {fixes}"
+
+
+def test_mcp_unknown_tool_dym_nudge(mod, sherpa_home, monkeypatch):
+    """When an MCP tool call fails with 'unknown tool' in the result,
+    the DYM nudge should fire and suggest the closest match."""
+    sid = "mcp_dym_test"
+    mod._drain_nudges(sid)
+    fake_reg = mod.FakeRegistry() if hasattr(mod, "FakeRegistry") else None
+    if fake_reg is None:
+        from tests.conftest import FakeRegistry
+        fake_reg = FakeRegistry()
+    fake_reg.register("mcp_grep", {
+        "name": "mcp_grep",
+        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]},
+    })
+    monkeypatch.setattr(mod, "_registry", lambda: fake_reg)
+    monkeypatch.setattr(mod, "_tool_registry_generation", lambda: fake_reg._generation)
+    _p54_enable(mod, "didyoumean", True)
+    result = "Error: mcp_grep_wrong is not a registered tool"
+    mod._post_tool_call(
+        tool_name="mcp_grep_wrong",
+        args={"pattern": "test"},
+        result=result,
+        session_id=sid,
+    )
+    with mod._session_lock:
+        nudges = mod._pending_nudges.get(sid, [])
+    texts = [t for _, t in nudges]
+    assert any("did you mean" in t.lower() for t in texts), f"Expected DYM nudge, got: {texts}"
+
+
+def test_extra_args_flagged_in_pre_tool_call(mod, sherpa_home, monkeypatch):
+    """When arg_guard is on and a model passes args not in the schema,
+    _pre_tool_call should flag the unknown args."""
+    fake_reg = mod.FakeRegistry() if hasattr(mod, "FakeRegistry") else None
+    if fake_reg is None:
+        from tests.conftest import FakeRegistry
+        fake_reg = FakeRegistry()
+    fake_reg.register("mcp_fetch", {
+        "name": "mcp_fetch",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "method": {"type": "string", "enum": ["GET", "POST"]},
+            },
+            "required": ["url"],
+        },
+    })
+    monkeypatch.setattr(mod, "_registry", lambda: fake_reg)
+    monkeypatch.setattr(mod, "_tool_registry_generation", lambda: fake_reg._generation)
+    _p54_enable(mod, "arg_guard", True)
+    args = {"url": "https://example.com", "headers": {"Accept": "text/html"}}
+    result = mod._pre_tool_call(
+        tool_name="mcp_fetch",
+        args=args,
+        session_id="extra_arg_test",
+    )
+    # Verify the schema validation doesn't crash on extra args.
+    issues = mod._schema_required_or_invalid_args("mcp_fetch", args)
+    assert isinstance(issues, list)

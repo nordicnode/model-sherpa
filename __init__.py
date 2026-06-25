@@ -1073,7 +1073,7 @@ _ERROR_HINTS: List[Tuple[re.Pattern, str]] = [
         "package manager first.",
     ),
     (
-        re.compile(r"no such tool|unknown tool|tool .* not (?:found|available)", re.I),
+        re.compile(r"no such tool|unknown tool|not (?:a )?(?:found|available|registered) tool|tool .* not (?:found|available|registered)", re.I),
         "Tip: that tool name isn't registered. Common mistakes: use "
         "`terminal` (not bash/shell), `read_file` (not cat), `search_files` "
         "(not grep/find), `write_file` (not echo >).",
@@ -1679,7 +1679,9 @@ def _didyoumean_tool(name: str) -> Optional[str]:
     """If *name* isn't a registered tool, propose the closest match via difflib.
 
     Mirrors _didyoumean_path but for tool names. Only fires when there are
-    ≥2 registered tools to compare against.
+    ≥1 registered tools to compare against. (Was ≥2, but MCP tool repair
+    needs DYM even with a single tool in the registry — there's no
+    ambiguity there.)
     """
     if not name or not isinstance(name, str):
         return None
@@ -1688,7 +1690,7 @@ def _didyoumean_tool(name: str) -> Optional[str]:
         if alias_target:
             return str(alias_target)
     candidates = _registered_tool_names()
-    if len(candidates) < 2:
+    if not candidates:
         return None
     if name in candidates:
         return None
@@ -2484,28 +2486,6 @@ def _post_tool_call_impl(
                         f"[SHERPA] `{path}` doesn't exist — did you mean `{guess}`?",
                     )
 
-        # Did-you-mean: unknown tool → propose closest registered name
-        if _feature("didyoumean") and re.search(
-            r"no such tool|unknown tool|tool .* not (?:found|available)",
-            result_text,
-            re.I,
-        ):
-            guess = _didyoumean_tool(tool_name)
-            if guess:
-                _bump_tool_stat(tool_name, "tool_dym")
-                _record_event(
-                    session_id,
-                    "tool_dym",
-                    f"{tool_name} → {guess}",
-                    tool=tool_name,
-                    suggestion=guess,
-                )
-                _queue_nudge(
-                    session_id,
-                    "didyoumean",
-                    f"[SHERPA] `{tool_name}` isn't a registered tool — did you mean `{guess}`?",
-                )
-
         if streak >= 2:
             hint = _match_error_hint(result_text)
             if hint:
@@ -2526,6 +2506,31 @@ def _post_tool_call_impl(
     else:
         with _session_lock:
             _error_streak[sid] = 0
+
+    # Did-you-mean: unknown tool → propose closest registered name.
+    # Outside the is_error gate so it fires on MCP-format error messages
+    # (e.g. "is not a registered tool") that _looks_like_error may not
+    # detect. The regex match on result_text IS the error signal.
+    if _feature("didyoumean") and re.search(
+        r"no such tool|unknown tool|not (?:a )?(?:found|available|registered) tool|tool .* not (?:found|available|registered)",
+        result_text,
+        re.I,
+    ):
+        guess = _didyoumean_tool(tool_name)
+        if guess:
+            _bump_tool_stat(tool_name, "tool_dym")
+            _record_event(
+                session_id,
+                "tool_dym",
+                f"{tool_name} → {guess}",
+                tool=tool_name,
+                suggestion=guess,
+            )
+            _queue_nudge(
+                session_id,
+                "didyoumean",
+                f"[SHERPA] `{tool_name}` isn't a registered tool — did you mean `{guess}`?",
+            )
 
 
 def _transform_tool_result(
