@@ -1505,3 +1505,63 @@ def test_state_dir_resolves_lazily_through_hermes_home(monkeypatch, tmp_path):
     mod = _load_fresh_module()
     assert Path(mod._state_dir()) == tmp_path / "memories" / "model-sherpa"
     assert Path(mod._state_file()) == tmp_path / "memories" / "model-sherpa" / "state.json"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.3: Fail-open uniformity across all hooks.
+#
+# _pre_tool_call already has a try/except → logger.exception → return None.
+# _post_tool_call, _transform_tool_result, and _pre_llm_call must follow the
+# same contract: any unhandled exception is logged and swallowed so a buggy
+# Sherpa never crashes the host agent.
+# ---------------------------------------------------------------------------
+
+
+def test_post_tool_call_fails_open(monkeypatch, mod, sherpa_home):
+    """An internal exception in _post_tool_call must be caught and the hook
+    must return its safe default (None) instead of propagating."""
+
+    def boom(*a, **kw):
+        raise RuntimeError("injected _post_tool_call fault")
+
+    monkeypatch.setattr(mod, "_record_call", boom)
+    # Must not raise.
+    result = mod._post_tool_call(
+        tool_name="terminal",
+        args={"command": "ls"},
+        result={"exit_code": 0},
+        session_id="fail_open_test",
+    )
+    assert result is None
+
+
+def test_transform_tool_result_fails_open(monkeypatch, mod, sherpa_home):
+    """An internal exception in _transform_tool_result must be caught and the
+    hook must return its safe default (None) instead of propagating."""
+
+    def boom(*a, **kw):
+        raise RuntimeError("injected _transform_tool_result fault")
+
+    monkeypatch.setattr(mod, "_looks_like_error", boom)
+    result = mod._transform_tool_result(
+        tool_name="terminal",
+        result="Error: something broke",
+        session_id="fail_open_test",
+    )
+    assert result is None
+
+
+def test_pre_llm_call_fails_open(monkeypatch, mod, sherpa_home):
+    """An internal exception in _pre_llm_call must be caught and the hook
+    must return its safe default (None) instead of propagating."""
+
+    def boom(*a, **kw):
+        raise RuntimeError("injected _pre_llm_call fault")
+
+    monkeypatch.setattr(mod, "_flush_stats", boom)
+    result = mod._pre_llm_call(
+        session_id="fail_open_test",
+        user_message="hello",
+        is_first_turn=True,
+    )
+    assert result is None

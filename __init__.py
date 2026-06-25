@@ -2348,7 +2348,40 @@ def _post_tool_call(
     duration_ms: int = 0,
     **_: Any,
 ) -> None:
-    """Track loops + errors; queue next-turn nudges."""
+    """Track loops + errors; queue next-turn nudges.
+
+    Fail-open: any unhandled exception is logged and swallowed so a buggy
+    Sherpa never crashes the host agent.  The safe default is None (no-op).
+    """
+    try:
+        _post_tool_call_impl(
+            tool_name=tool_name,
+            args=args,
+            result=result,
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        logger.exception(
+            "model-sherpa: _post_tool_call failed for tool=%s (%s); failing open",
+            tool_name,
+            exc,
+        )
+
+
+def _post_tool_call_impl(
+    tool_name: str = "",
+    args: Optional[Dict[str, Any]] = None,
+    result: Any = None,
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    duration_ms: int = 0,
+    **_: Any,
+) -> None:
+    """Implementation of _post_tool_call. See _post_tool_call for the contract."""
     state = _load_state()
     if not state.get("enabled"):
         return
@@ -2447,6 +2480,40 @@ def _transform_tool_result(
 ) -> Optional[str]:
     """Append a Tip: footer to error results so the model sees it in-turn.
 
+    Fail-open: any unhandled exception is logged and the hook returns None
+    (no transformation) so a buggy Sherpa never crashes the host agent.
+    """
+    try:
+        return _transform_tool_result_impl(
+            tool_name=tool_name,
+            args=args,
+            result=result,
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        logger.exception(
+            "model-sherpa: _transform_tool_result failed for tool=%s (%s); failing open",
+            tool_name,
+            exc,
+        )
+        return None
+
+
+def _transform_tool_result_impl(
+    tool_name: str = "",
+    args: Optional[Dict[str, Any]] = None,
+    result: Any = None,
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    duration_ms: int = 0,
+    **_: Any,
+) -> Optional[str]:
+    """Implementation of _transform_tool_result. See _transform_tool_result for the contract.
+
     Only fires when the framework already has a string result (the
     transform_tool_result contract requires us to return a string).
     For non-string results we still seed a next-turn nudge via the
@@ -2481,7 +2548,40 @@ def _pre_llm_call(
     sender_id: str = "",
     **_: Any,
 ) -> Optional[Dict[str, str]]:
-    """Inject per-turn nudges into the user message."""
+    """Inject per-turn nudges into the user message.
+
+    Fail-open: any unhandled exception is logged and the hook returns None
+    (no injection) so a buggy Sherpa never crashes the host agent.
+    """
+    try:
+        return _pre_llm_call_impl(
+            session_id=session_id,
+            user_message=user_message,
+            conversation_history=conversation_history,
+            is_first_turn=is_first_turn,
+            model=model,
+            platform=platform,
+            sender_id=sender_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            "model-sherpa: _pre_llm_call failed (%s); failing open",
+            exc,
+        )
+        return None
+
+
+def _pre_llm_call_impl(
+    session_id: str = "",
+    user_message: str = "",
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    is_first_turn: bool = False,
+    model: str = "",
+    platform: str = "",
+    sender_id: str = "",
+    **_: Any,
+) -> Optional[Dict[str, str]]:
+    """Implementation of _pre_llm_call. See _pre_llm_call for the contract."""
     _flush_stats()
     state = _load_state()
     if not state.get("enabled"):
